@@ -1,0 +1,2143 @@
+{
+  "address": "GtuQoYxzytGKtLqQGkYrVbsaPHTZN5jboP25DrSmKvGr",
+  "metadata": {
+    "name": "vanna_phoenix_vault",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Vanna basis vaults on Solana hedged on Phoenix perpetuals: one share vault per asset (SOL, ETH, BTC, TSLA, META)"
+  },
+  "instructions": [
+    {
+      "name": "create_vault",
+      "discriminator": [
+        29,
+        237,
+        247,
+        208,
+        193,
+        82,
+        54,
+        135
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "asset_mint"
+        },
+        {
+          "name": "basis_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  97,
+                  115,
+                  105,
+                  115,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset_mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "basis_vault"
+              },
+              {
+                "kind": "arg",
+                "path": "authority_nonce"
+              }
+            ]
+          }
+        },
+        {
+          "name": "share_mint",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  104,
+                  97,
+                  114,
+                  101,
+                  95,
+                  109,
+                  105,
+                  110,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "basis_vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "phoenix_mint"
+        },
+        {
+          "name": "vault_usdc",
+          "writable": true
+        },
+        {
+          "name": "vault_phoenix",
+          "writable": true
+        },
+        {
+          "name": "vault_asset",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "trader_account",
+          "writable": true
+        },
+        {
+          "name": "phoenix_program",
+          "address": "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih"
+        },
+        {
+          "name": "log_authority",
+          "address": "GdxfTLSsdSY37G6fZoYtdGDSfgFnbT2EmRpuePZxWShS"
+        },
+        {
+          "name": "global_config",
+          "writable": true,
+          "address": "2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ"
+        },
+        {
+          "name": "orderbook"
+        },
+        {
+          "name": "spline_collection"
+        },
+        {
+          "name": "perp_asset_map"
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "asset_token_program",
+          "docs": [
+            "Token for the SOL vault."
+          ]
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "kind",
+          "type": {
+            "defined": {
+              "name": "VaultKind"
+            }
+          }
+        },
+        {
+          "name": "market",
+          "type": {
+            "defined": {
+              "name": "MarketParams"
+            }
+          }
+        },
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "VaultParams"
+            }
+          }
+        },
+        {
+          "name": "authority_nonce",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "deposit",
+      "discriminator": [
+        242,
+        35,
+        198,
+        137,
+        82,
+        225,
+        242,
+        182
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "core",
+          "accounts": [
+            {
+              "name": "config",
+              "pda": {
+                "seeds": [
+                  {
+                    "kind": "const",
+                    "value": [
+                      99,
+                      111,
+                      110,
+                      102,
+                      105,
+                      103
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "name": "basis_vault",
+              "docs": [
+                "A vault of this program: only `create_vault` makes one, at its asset's PDA, so the",
+                "owner and type checks are enough (re-deriving the PDA here would overflow the stack).",
+                "Writable for the keeper's daily rebalancing count."
+              ],
+              "writable": true
+            },
+            {
+              "name": "authority",
+              "writable": true
+            },
+            {
+              "name": "share_mint",
+              "writable": true
+            },
+            {
+              "name": "usdc_mint"
+            },
+            {
+              "name": "phoenix_mint",
+              "writable": true
+            },
+            {
+              "name": "vault_usdc",
+              "writable": true
+            },
+            {
+              "name": "vault_phoenix",
+              "writable": true
+            },
+            {
+              "name": "vault_asset",
+              "writable": true,
+              "optional": true
+            },
+            {
+              "name": "asset_mint",
+              "docs": [
+                "is read from it."
+              ]
+            },
+            {
+              "name": "asset_token_program"
+            },
+            {
+              "name": "trader_account",
+              "writable": true
+            },
+            {
+              "name": "phoenix",
+              "accounts": [
+                {
+                  "name": "phoenix_program",
+                  "address": "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih"
+                },
+                {
+                  "name": "log_authority",
+                  "address": "GdxfTLSsdSY37G6fZoYtdGDSfgFnbT2EmRpuePZxWShS"
+                },
+                {
+                  "name": "global_config",
+                  "writable": true,
+                  "address": "2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ"
+                },
+                {
+                  "name": "hawkeye_program",
+                  "address": "RiSeVw3ZjNfsaXPRb4mgaqYaEEt41pNNJoDvVh7pgQj"
+                },
+                {
+                  "name": "ember_program",
+                  "address": "EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy"
+                },
+                {
+                  "name": "ember_state"
+                },
+                {
+                  "name": "ember_vault",
+                  "writable": true
+                }
+              ]
+            },
+            {
+              "name": "perp_asset_map",
+              "writable": true
+            },
+            {
+              "name": "orderbook",
+              "writable": true
+            },
+            {
+              "name": "spline_collection",
+              "writable": true
+            },
+            {
+              "name": "withdraw_queue",
+              "writable": true
+            },
+            {
+              "name": "global_vault",
+              "writable": true
+            }
+          ]
+        },
+        {
+          "name": "user_shares",
+          "writable": true
+        },
+        {
+          "name": "user_asset",
+          "docs": [
+            "The user's asset tokens (spot vaults). The SOL vault takes lamports from `user`."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "user_usdc",
+          "docs": [
+            "The user's USDC, when the deposit brings margin."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "swap_program",
+          "optional": true
+        },
+        {
+          "name": "vault_wsol",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "gti",
+          "type": "u8"
+        },
+        {
+          "name": "atb",
+          "type": "u8"
+        },
+        {
+          "name": "asset_amount",
+          "type": "u64"
+        },
+        {
+          "name": "usdc_amount",
+          "type": "u64"
+        },
+        {
+          "name": "min_shares",
+          "type": "u64"
+        },
+        {
+          "name": "route",
+          "type": {
+            "option": {
+              "defined": {
+                "name": "SwapRoute"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "initialize",
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "docs": [
+            "The program's upgrade authority: whoever deployed it, so nobody can take the admin role",
+            "by initializing a fresh deployment first."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "program",
+          "address": "GtuQoYxzytGKtLqQGkYrVbsaPHTZN5jboP25DrSmKvGr"
+        },
+        {
+          "name": "program_data"
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "usdc_mint"
+        },
+        {
+          "name": "phoenix_mint",
+          "docs": [
+            "Phoenix's collateral token (PhUSD)."
+          ]
+        },
+        {
+          "name": "perp_asset_map"
+        },
+        {
+          "name": "withdraw_queue"
+        },
+        {
+          "name": "global_vault"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "keeper",
+          "type": "pubkey"
+        },
+        {
+          "name": "swap_program",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "rebalance",
+      "discriminator": [
+        108,
+        158,
+        77,
+        9,
+        210,
+        52,
+        88,
+        62
+      ],
+      "accounts": [
+        {
+          "name": "keeper",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "core",
+          "accounts": [
+            {
+              "name": "config",
+              "pda": {
+                "seeds": [
+                  {
+                    "kind": "const",
+                    "value": [
+                      99,
+                      111,
+                      110,
+                      102,
+                      105,
+                      103
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "name": "basis_vault",
+              "docs": [
+                "A vault of this program: only `create_vault` makes one, at its asset's PDA, so the",
+                "owner and type checks are enough (re-deriving the PDA here would overflow the stack).",
+                "Writable for the keeper's daily rebalancing count."
+              ],
+              "writable": true
+            },
+            {
+              "name": "authority",
+              "writable": true
+            },
+            {
+              "name": "share_mint",
+              "writable": true
+            },
+            {
+              "name": "usdc_mint"
+            },
+            {
+              "name": "phoenix_mint",
+              "writable": true
+            },
+            {
+              "name": "vault_usdc",
+              "writable": true
+            },
+            {
+              "name": "vault_phoenix",
+              "writable": true
+            },
+            {
+              "name": "vault_asset",
+              "writable": true,
+              "optional": true
+            },
+            {
+              "name": "asset_mint",
+              "docs": [
+                "is read from it."
+              ]
+            },
+            {
+              "name": "asset_token_program"
+            },
+            {
+              "name": "trader_account",
+              "writable": true
+            },
+            {
+              "name": "phoenix",
+              "accounts": [
+                {
+                  "name": "phoenix_program",
+                  "address": "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih"
+                },
+                {
+                  "name": "log_authority",
+                  "address": "GdxfTLSsdSY37G6fZoYtdGDSfgFnbT2EmRpuePZxWShS"
+                },
+                {
+                  "name": "global_config",
+                  "writable": true,
+                  "address": "2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ"
+                },
+                {
+                  "name": "hawkeye_program",
+                  "address": "RiSeVw3ZjNfsaXPRb4mgaqYaEEt41pNNJoDvVh7pgQj"
+                },
+                {
+                  "name": "ember_program",
+                  "address": "EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy"
+                },
+                {
+                  "name": "ember_state"
+                },
+                {
+                  "name": "ember_vault",
+                  "writable": true
+                }
+              ]
+            },
+            {
+              "name": "perp_asset_map",
+              "writable": true
+            },
+            {
+              "name": "orderbook",
+              "writable": true
+            },
+            {
+              "name": "spline_collection",
+              "writable": true
+            },
+            {
+              "name": "withdraw_queue",
+              "writable": true
+            },
+            {
+              "name": "global_vault",
+              "writable": true
+            }
+          ]
+        },
+        {
+          "name": "keeper_asset",
+          "docs": [
+            "The keeper's asset tokens (spot vaults); the SOL vault swaps lamports with `keeper`."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "keeper_usdc",
+          "writable": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "gti",
+          "type": "u8"
+        },
+        {
+          "name": "atb",
+          "type": "u8"
+        },
+        {
+          "name": "buy_asset",
+          "type": "bool"
+        },
+        {
+          "name": "asset_amount",
+          "type": "u64"
+        },
+        {
+          "name": "usdc_amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "set_config",
+      "discriminator": [
+        108,
+        158,
+        154,
+        175,
+        212,
+        98,
+        52,
+        66
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "admin",
+          "type": "pubkey"
+        },
+        {
+          "name": "keeper",
+          "type": "pubkey"
+        },
+        {
+          "name": "swap_program",
+          "type": "pubkey"
+        },
+        {
+          "name": "paused",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "set_deposits_open",
+      "docs": [
+        "The keeper's funding guard (or the admin): open or close a vault's deposits."
+      ],
+      "discriminator": [
+        91,
+        221,
+        147,
+        146,
+        85,
+        176,
+        56,
+        189
+      ],
+      "accounts": [
+        {
+          "name": "signer",
+          "docs": [
+            "The keeper or the admin."
+          ],
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "basis_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  97,
+                  115,
+                  105,
+                  115,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "basis_vault.asset_mint",
+                "account": "BasisVault"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "open",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "update_vault",
+      "discriminator": [
+        67,
+        229,
+        185,
+        188,
+        226,
+        11,
+        210,
+        60
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "basis_vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  97,
+                  115,
+                  105,
+                  115,
+                  95,
+                  118,
+                  97,
+                  117,
+                  108,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "basis_vault.asset_mint",
+                "account": "BasisVault"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "params",
+          "type": {
+            "defined": {
+              "name": "VaultParams"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "withdraw",
+      "discriminator": [
+        183,
+        18,
+        70,
+        156,
+        148,
+        109,
+        161,
+        34
+      ],
+      "accounts": [
+        {
+          "name": "user",
+          "docs": [
+            "Receives the SOL vault's payout as lamports."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "core",
+          "accounts": [
+            {
+              "name": "config",
+              "pda": {
+                "seeds": [
+                  {
+                    "kind": "const",
+                    "value": [
+                      99,
+                      111,
+                      110,
+                      102,
+                      105,
+                      103
+                    ]
+                  }
+                ]
+              }
+            },
+            {
+              "name": "basis_vault",
+              "docs": [
+                "A vault of this program: only `create_vault` makes one, at its asset's PDA, so the",
+                "owner and type checks are enough (re-deriving the PDA here would overflow the stack).",
+                "Writable for the keeper's daily rebalancing count."
+              ],
+              "writable": true
+            },
+            {
+              "name": "authority",
+              "writable": true
+            },
+            {
+              "name": "share_mint",
+              "writable": true
+            },
+            {
+              "name": "usdc_mint"
+            },
+            {
+              "name": "phoenix_mint",
+              "writable": true
+            },
+            {
+              "name": "vault_usdc",
+              "writable": true
+            },
+            {
+              "name": "vault_phoenix",
+              "writable": true
+            },
+            {
+              "name": "vault_asset",
+              "writable": true,
+              "optional": true
+            },
+            {
+              "name": "asset_mint",
+              "docs": [
+                "is read from it."
+              ]
+            },
+            {
+              "name": "asset_token_program"
+            },
+            {
+              "name": "trader_account",
+              "writable": true
+            },
+            {
+              "name": "phoenix",
+              "accounts": [
+                {
+                  "name": "phoenix_program",
+                  "address": "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih"
+                },
+                {
+                  "name": "log_authority",
+                  "address": "GdxfTLSsdSY37G6fZoYtdGDSfgFnbT2EmRpuePZxWShS"
+                },
+                {
+                  "name": "global_config",
+                  "writable": true,
+                  "address": "2zskx2iyCvb6Stg7RBZkt1f6MrF4dpYtMG3yMvKwqtUZ"
+                },
+                {
+                  "name": "hawkeye_program",
+                  "address": "RiSeVw3ZjNfsaXPRb4mgaqYaEEt41pNNJoDvVh7pgQj"
+                },
+                {
+                  "name": "ember_program",
+                  "address": "EMBERpYNE6ehWmXymZZS2skiFmCa9V5dp14e1iduM5qy"
+                },
+                {
+                  "name": "ember_state"
+                },
+                {
+                  "name": "ember_vault",
+                  "writable": true
+                }
+              ]
+            },
+            {
+              "name": "perp_asset_map",
+              "writable": true
+            },
+            {
+              "name": "orderbook",
+              "writable": true
+            },
+            {
+              "name": "spline_collection",
+              "writable": true
+            },
+            {
+              "name": "withdraw_queue",
+              "writable": true
+            },
+            {
+              "name": "global_vault",
+              "writable": true
+            }
+          ]
+        },
+        {
+          "name": "user_shares",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "user"
+              },
+              {
+                "kind": "const",
+                "value": [
+                  6,
+                  221,
+                  246,
+                  225,
+                  215,
+                  101,
+                  161,
+                  147,
+                  217,
+                  203,
+                  225,
+                  70,
+                  206,
+                  235,
+                  121,
+                  172,
+                  28,
+                  180,
+                  133,
+                  237,
+                  95,
+                  91,
+                  55,
+                  145,
+                  58,
+                  140,
+                  245,
+                  133,
+                  126,
+                  255,
+                  0,
+                  169
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "core.share_mint",
+                "account": "VaultCore"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "user_asset",
+          "docs": [
+            "Receives a spot vault's asset."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "user_usdc",
+          "docs": [
+            "Receives the USDC part of the payout."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "swap_program",
+          "optional": true
+        },
+        {
+          "name": "vault_wsol",
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "token_program",
+          "address": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "gti",
+          "type": "u8"
+        },
+        {
+          "name": "atb",
+          "type": "u8"
+        },
+        {
+          "name": "shares",
+          "type": "u64"
+        },
+        {
+          "name": "min_asset_out",
+          "type": "u64"
+        },
+        {
+          "name": "min_usdc_out",
+          "type": "u64"
+        },
+        {
+          "name": "receive",
+          "type": {
+            "defined": {
+              "name": "Receive"
+            }
+          }
+        },
+        {
+          "name": "route",
+          "type": {
+            "option": {
+              "defined": {
+                "name": "SwapRoute"
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "BasisVault",
+      "discriminator": [
+        123,
+        245,
+        72,
+        41,
+        28,
+        175,
+        157,
+        209
+      ]
+    },
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "Deposited",
+      "discriminator": [
+        111,
+        141,
+        26,
+        45,
+        161,
+        35,
+        100,
+        57
+      ]
+    },
+    {
+      "name": "DepositsSet",
+      "discriminator": [
+        128,
+        53,
+        43,
+        162,
+        119,
+        135,
+        44,
+        22
+      ]
+    },
+    {
+      "name": "Rebalanced",
+      "discriminator": [
+        74,
+        101,
+        57,
+        244,
+        181,
+        179,
+        52,
+        182
+      ]
+    },
+    {
+      "name": "Swapped",
+      "discriminator": [
+        217,
+        52,
+        52,
+        83,
+        147,
+        135,
+        96,
+        109
+      ]
+    },
+    {
+      "name": "VaultCreated",
+      "discriminator": [
+        117,
+        25,
+        120,
+        254,
+        75,
+        236,
+        78,
+        115
+      ]
+    },
+    {
+      "name": "Withdrawn",
+      "discriminator": [
+        20,
+        89,
+        223,
+        198,
+        194,
+        124,
+        219,
+        13
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "Unauthorized",
+      "msg": "Signer is not allowed to do this"
+    },
+    {
+      "code": 6001,
+      "name": "Paused",
+      "msg": "The protocol is paused"
+    },
+    {
+      "code": 6002,
+      "name": "DepositsClosed",
+      "msg": "Deposits into this vault are closed"
+    },
+    {
+      "code": 6003,
+      "name": "ZeroAmount",
+      "msg": "Amount must be greater than zero"
+    },
+    {
+      "code": 6004,
+      "name": "MathOverflow",
+      "msg": "Math overflow"
+    },
+    {
+      "code": 6005,
+      "name": "DivisionByZero",
+      "msg": "Division by zero"
+    },
+    {
+      "code": 6006,
+      "name": "InvalidMint",
+      "msg": "Mint does not match the vault"
+    },
+    {
+      "code": 6007,
+      "name": "InvalidTokenAccount",
+      "msg": "Token account does not match the vault"
+    },
+    {
+      "code": 6008,
+      "name": "InvalidPhoenixAccount",
+      "msg": "Phoenix account does not match the vault"
+    },
+    {
+      "code": 6009,
+      "name": "MissingPhoenixAccounts",
+      "msg": "Phoenix trader index accounts are missing"
+    },
+    {
+      "code": 6010,
+      "name": "PhoenixInstruction",
+      "msg": "Phoenix instruction could not be built or read"
+    },
+    {
+      "code": 6011,
+      "name": "InvalidPrice",
+      "msg": "Phoenix returned an unusable price"
+    },
+    {
+      "code": 6012,
+      "name": "MaxPositionReached",
+      "msg": "The vault's position would pass its cap"
+    },
+    {
+      "code": 6013,
+      "name": "OpenInterestShareReached",
+      "msg": "The vault's short would pass its share of the market's open interest"
+    },
+    {
+      "code": 6014,
+      "name": "DepositTooLarge",
+      "msg": "The deposit is larger than the vault takes at once"
+    },
+    {
+      "code": 6015,
+      "name": "MarketAfterHours",
+      "msg": "The market is trading after hours: deposits wait for the session"
+    },
+    {
+      "code": 6016,
+      "name": "UnsupportedMint",
+      "msg": "The asset's token has an extension the vault does not support"
+    },
+    {
+      "code": 6017,
+      "name": "VaultInsolvent",
+      "msg": "The vault owes more than it holds: deposits would pay its debt"
+    },
+    {
+      "code": 6018,
+      "name": "RebalanceLimitReached",
+      "msg": "The keeper's rebalancing would pass its daily limit"
+    },
+    {
+      "code": 6019,
+      "name": "MultiplierChanging",
+      "msg": "The token's multiplier is changing: deposits wait until it has settled"
+    },
+    {
+      "code": 6020,
+      "name": "DepositOffMix",
+      "msg": "A deposit without a swap must match the vault's asset and USDC mix"
+    },
+    {
+      "code": 6021,
+      "name": "MarginTooThin",
+      "msg": "The vault's margin would fall below its target"
+    },
+    {
+      "code": 6022,
+      "name": "SharesTooLow",
+      "msg": "Fewer shares than the minimum"
+    },
+    {
+      "code": 6023,
+      "name": "PayoutTooLow",
+      "msg": "Payout is below the minimum"
+    },
+    {
+      "code": 6024,
+      "name": "NothingDeposited",
+      "msg": "The deposit added no value"
+    },
+    {
+      "code": 6025,
+      "name": "NothingToWithdraw",
+      "msg": "Phoenix lets nothing leave the vault right now"
+    },
+    {
+      "code": 6026,
+      "name": "NotEnoughShares",
+      "msg": "Not enough shares"
+    },
+    {
+      "code": 6027,
+      "name": "PriceOutOfBand",
+      "msg": "Trade price is outside the allowed band around the mark price"
+    },
+    {
+      "code": 6028,
+      "name": "WrongVaultKind",
+      "msg": "This vault kind does not take this account"
+    },
+    {
+      "code": 6029,
+      "name": "InvalidSwapAccounts",
+      "msg": "Swap accounts are missing or wrong"
+    },
+    {
+      "code": 6030,
+      "name": "SwapNotNeeded",
+      "msg": "This deposit or withdrawal needs no swap"
+    },
+    {
+      "code": 6031,
+      "name": "SwapAmountOff",
+      "msg": "The swap did not spend the planned amount"
+    },
+    {
+      "code": 6032,
+      "name": "SwapPriceTooLow",
+      "msg": "The swap paid less than the mark price allows"
+    },
+    {
+      "code": 6033,
+      "name": "SwapMovedVaultFunds",
+      "msg": "The swap touched vault funds it was not given"
+    },
+    {
+      "code": 6034,
+      "name": "InvalidParameter",
+      "msg": "Invalid parameter"
+    }
+  ],
+  "types": [
+    {
+      "name": "BasisVault",
+      "docs": [
+        "One vault per asset. Depositors get the vault's shares; the vault holds the asset and an",
+        "equal short on Phoenix, so its value is flat in USD and it earns the funding longs pay",
+        "shorts. The share price is the vault's NAV over its supply. Phoenix fills market orders",
+        "in the same instruction, so every deposit and withdrawal settles at once and is priced",
+        "from the NAV before and after its own trade: each user carries their own trading cost."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "kind",
+            "type": {
+              "defined": {
+                "name": "VaultKind"
+              }
+            }
+          },
+          {
+            "name": "asset_mint",
+            "docs": [
+              "The asset; the native mint for the SOL vault."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "asset_decimals",
+            "type": "u8"
+          },
+          {
+            "name": "asset_token_program",
+            "docs": [
+              "The asset's token program: SPL Token, or Token-2022 for tokenized stocks."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "share_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "usdc_account",
+            "docs": [
+              "The authority's token accounts; `asset_account` is unset for the SOL vault."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "phoenix_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "asset_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "trader_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "asset_id",
+            "docs": [
+              "The Phoenix market the vault shorts."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "orderbook",
+            "type": "pubkey"
+          },
+          {
+            "name": "spline_collection",
+            "type": "pubkey"
+          },
+          {
+            "name": "base_lot_decimals",
+            "docs": [
+              "Base lots per whole asset are `10^base_lot_decimals`."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "tick_size",
+            "docs": [
+              "Quote lots per base lot per price tick."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "max_position_usd",
+            "docs": [
+              "Max short notional (USD, 6 dp)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "max_asset_units",
+            "docs": [
+              "Max asset the vault holds, in its smallest units. For the SOL vault this stays under",
+              "the native SOL Phoenix counts as collateral per trader (500 SOL on mainnet)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "max_oi_share_bps",
+            "docs": [
+              "Max share of the Phoenix market's open interest the vault's short may be, in bps.",
+              "Shorts earn funding only while longs outweigh them; a vault that is most of the short",
+              "side pushes funding against itself."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "max_deposit_usd",
+            "docs": [
+              "Max value a single deposit may add (USD, 6 dp): large deposits come in parts the",
+              "order book can take."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "slippage_bps",
+            "docs": [
+              "Price band around Phoenix's mark price for the vault's orders and users' swaps."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "keeper_band_bps",
+            "docs": [
+              "The keeper's own, tighter band for `rebalance`, where the keeper is the vault's",
+              "counterparty."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "max_rebalance_usd",
+            "docs": [
+              "Max value the keeper may rebalance per `REBALANCE_WINDOW_SECONDS` (USD, 6 dp): what a",
+              "stolen keeper key could cost the vault is at most the band on this."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "rebalance_window_start",
+            "type": "i64"
+          },
+          {
+            "name": "rebalance_window_usd",
+            "type": "u64"
+          },
+          {
+            "name": "margin_bps",
+            "docs": [
+              "Phoenix effective collateral the vault keeps per dollar of short, in bps. Deposits",
+              "and reinvesting may not take the vault below it."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "target_margin_bps",
+            "docs": [
+              "USDC margin a single-asset deposit sets aside per dollar of asset, in bps: 10,000",
+              "(1x) splits a deposit half asset, half USDC. 0 for the SOL vault, whose SOL is its own",
+              "margin."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "deposits_open",
+            "type": "bool"
+          },
+          {
+            "name": "after_hours_deposits",
+            "docs": [
+              "Whether deposits stay open while Phoenix trades the market after hours (stock markets",
+              "on weekends and holidays, when the book is thin and the price is held near the last",
+              "close) or reopens it. Withdrawals are always open."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "authority_nonce",
+            "docs": [
+              "Part of the authority's address, picked by the admin at `create_vault` (little-endian",
+              "u64), so nobody can claim the vault's Phoenix trader before the vault exists."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                8
+              ]
+            }
+          },
+          {
+            "name": "authority_bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Config",
+      "docs": [
+        "Protocol-wide roles and the Phoenix accounts every vault shares."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "keeper",
+            "docs": [
+              "The bot that reinvests funding and keeps each vault's margin near its target."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "usdc_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "phoenix_mint",
+            "docs": [
+              "Phoenix's collateral token (PhUSD), minted 1:1 for USDC by Ember."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "perp_asset_map",
+            "type": "pubkey"
+          },
+          {
+            "name": "withdraw_queue",
+            "type": "pubkey"
+          },
+          {
+            "name": "global_vault",
+            "docs": [
+              "Phoenix's token vault for `phoenix_mint`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "swap_program",
+            "docs": [
+              "The swap venue the vault may route single-asset deposits and withdrawals through",
+              "(Jupiter on mainnet)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "paused",
+            "type": "bool"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Deposited",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "basis_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "asset_amount",
+            "type": "u64"
+          },
+          {
+            "name": "usdc_amount",
+            "type": "u64"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          },
+          {
+            "name": "value_usd",
+            "docs": [
+              "Value the deposit added after its own trade (USD, 6 dp)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "nav_before_usd",
+            "type": "u64"
+          },
+          {
+            "name": "position_lots",
+            "docs": [
+              "The vault's position after the deposit, in base lots; negative is short."
+            ],
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "DepositsSet",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "basis_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "open",
+            "type": "bool"
+          },
+          {
+            "name": "by",
+            "docs": [
+              "The keeper or the admin."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MarketParams",
+      "docs": [
+        "The Phoenix market a vault shorts: its asset id and lot and tick sizes."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "asset_id",
+            "type": "u32"
+          },
+          {
+            "name": "base_lot_decimals",
+            "type": "u8"
+          },
+          {
+            "name": "tick_size",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Rebalanced",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "basis_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "buy_asset",
+            "docs": [
+              "True when funding USDC was reinvested into the asset."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "asset_amount",
+            "type": "u64"
+          },
+          {
+            "name": "usdc_amount",
+            "type": "u64"
+          },
+          {
+            "name": "nav_before_usd",
+            "type": "u64"
+          },
+          {
+            "name": "nav_after_usd",
+            "type": "u64"
+          },
+          {
+            "name": "position_lots",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Receive",
+      "docs": [
+        "How a withdrawal is paid."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Both"
+          },
+          {
+            "name": "Asset"
+          },
+          {
+            "name": "Usdc"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SwapRoute",
+      "docs": [
+        "A venue instruction built off-chain for the vault authority."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "accounts",
+            "docs": [
+              "How many `remaining_accounts` after Phoenix's index accounts the route takes."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "data",
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Swapped",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "basis_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "sold_usdc",
+            "docs": [
+              "True when the vault sold USDC for the asset."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "spent",
+            "type": "u64"
+          },
+          {
+            "name": "received",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "basis_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "asset_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "share_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "trader_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "asset_id",
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultKind",
+      "docs": [
+        "How a vault holds the asset it hedges."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "NativeSol"
+          },
+          {
+            "name": "Spot"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VaultParams",
+      "docs": [
+        "A vault's caps and trading settings; see `BasisVault` for each."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "max_position_usd",
+            "type": "u64"
+          },
+          {
+            "name": "max_asset_units",
+            "type": "u64"
+          },
+          {
+            "name": "max_oi_share_bps",
+            "type": "u16"
+          },
+          {
+            "name": "max_deposit_usd",
+            "type": "u64"
+          },
+          {
+            "name": "slippage_bps",
+            "type": "u16"
+          },
+          {
+            "name": "keeper_band_bps",
+            "type": "u16"
+          },
+          {
+            "name": "max_rebalance_usd",
+            "type": "u64"
+          },
+          {
+            "name": "margin_bps",
+            "type": "u16"
+          },
+          {
+            "name": "target_margin_bps",
+            "type": "u16"
+          },
+          {
+            "name": "deposits_open",
+            "type": "bool"
+          },
+          {
+            "name": "after_hours_deposits",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Withdrawn",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "basis_vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "user",
+            "type": "pubkey"
+          },
+          {
+            "name": "shares",
+            "type": "u64"
+          },
+          {
+            "name": "payout_usd",
+            "type": "u64"
+          },
+          {
+            "name": "asset_out",
+            "type": "u64"
+          },
+          {
+            "name": "usdc_out",
+            "type": "u64"
+          },
+          {
+            "name": "position_lots",
+            "type": "i64"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -171,14 +171,12 @@ function remainingAccounts(phoenix: PhoenixKeys, route?: SwapRoute): AccountMeta
 export interface DepositParams {
   vault: VaultInfo;
   user: PublicKey;
-  /** In the asset's smallest units (lamports for SOL). */
-  assetAmount: bigint;
-  /** In USDC's smallest units (6 decimals). */
+  /** In USDC's smallest units (6 decimals): deposits are USDC only. */
   usdcAmount: bigint;
   /** The least shares the user accepts; the transaction fails below it. */
   minShares: bigint;
-  /** A Jupiter route, for a single-asset deposit (see `planDepositSwap`). */
-  route?: SwapRoute;
+  /** The Jupiter route that buys the asset (see `depositSwapAmount`). */
+  route: SwapRoute;
   phoenix?: PhoenixKeys;
 }
 
@@ -194,20 +192,17 @@ export async function depositInstruction(
     .deposit(
       phoenix.globalTraderIndex.length,
       phoenix.activeTraderBuffer.length,
-      new BN(p.assetAmount.toString()),
       new BN(p.usdcAmount.toString()),
       new BN(p.minShares.toString()),
-      route ? { accounts: route.args.accounts, data: route.args.data } : null,
+      { accounts: route.args.accounts, data: route.args.data },
     )
     .accountsStrict({
       user,
       core: coreAccounts(vault, phoenix),
       userShares: userShareAccount(user, vault.shareMint),
-      // Only the accounts the deposit takes from: a USDC-only depositor needs no asset account.
-      userAsset: spot && p.assetAmount > 0n ? tokenAccount(user, vault.assetMint, vault.assetTokenProgram) : null,
-      userUsdc: p.usdcAmount > 0n ? tokenAccount(user, vault.usdcMint, TOKEN_PROGRAM_ID) : null,
-      swapProgram: route ? JUPITER_PROGRAM_ID : null,
-      vaultWsol: route && !spot ? vaultWsolAccount(vault.authority) : null,
+      userUsdc: tokenAccount(user, vault.usdcMint, TOKEN_PROGRAM_ID),
+      swapProgram: JUPITER_PROGRAM_ID,
+      vaultWsol: spot ? null : vaultWsolAccount(vault.authority),
       tokenProgram: TOKEN_PROGRAM_ID,
       associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
       systemProgram: SystemProgram.programId,
@@ -216,18 +211,16 @@ export async function depositInstruction(
     .instruction();
 }
 
-/** How a withdrawal pays: the user's part as it is, or all in one asset (needs a route). */
-export type Receive = "both" | "asset" | "usdc";
-
 export interface WithdrawParams {
   vault: VaultInfo;
   user: PublicKey;
   shares: bigint;
-  /** Least asset (smallest units) and USDC (6 dp) the user accepts. */
-  minAssetOut: bigint;
+  /** The least USDC (6 dp) the user accepts: withdrawals pay USDC only. */
   minUsdcOut: bigint;
-  receive: Receive;
-  /** A Jupiter route when `receive` is `asset` or `usdc` (see `planWithdrawSwap`). */
+  /**
+   * The Jupiter route that sells the user's part of the asset (see `withdrawSwapEstimate`);
+   * left out only when Phoenix lets no asset leave now.
+   */
   route?: SwapRoute;
   phoenix?: PhoenixKeys;
 }
@@ -245,16 +238,13 @@ export async function withdrawInstruction(
       phoenix.globalTraderIndex.length,
       phoenix.activeTraderBuffer.length,
       new BN(p.shares.toString()),
-      new BN(p.minAssetOut.toString()),
       new BN(p.minUsdcOut.toString()),
-      { [p.receive]: {} } as any,
       route ? { accounts: route.args.accounts, data: route.args.data } : null,
     )
     .accountsStrict({
       user,
       core: coreAccounts(vault, phoenix),
       userShares: userShareAccount(user, vault.shareMint),
-      userAsset: spot ? tokenAccount(user, vault.assetMint, vault.assetTokenProgram) : null,
       userUsdc: tokenAccount(user, vault.usdcMint, TOKEN_PROGRAM_ID),
       swapProgram: route ? JUPITER_PROGRAM_ID : null,
       vaultWsol: route && !spot ? vaultWsolAccount(vault.authority) : null,
@@ -267,12 +257,11 @@ export async function withdrawInstruction(
 }
 
 /**
- * Creates (if missing) the token accounts a withdrawal pays into: the user's USDC account and,
- * for a spot vault, their asset account under the asset's token program. Put these before the
- * withdraw instruction; they cost nothing when the accounts exist.
+ * Creates the user's USDC account (if missing), which a withdrawal pays into. Put it before
+ * the withdraw instruction; it costs nothing when the account exists.
  */
 export function withdrawSetupInstructions(vault: VaultInfo, user: PublicKey): TransactionInstruction[] {
-  const ixs = [
+  return [
     createAssociatedTokenAccountIdempotentInstruction(
       user,
       tokenAccount(user, vault.usdcMint, TOKEN_PROGRAM_ID),
@@ -281,16 +270,4 @@ export function withdrawSetupInstructions(vault: VaultInfo, user: PublicKey): Tr
       TOKEN_PROGRAM_ID,
     ),
   ];
-  if (vault.kind === "spot") {
-    ixs.push(
-      createAssociatedTokenAccountIdempotentInstruction(
-        user,
-        tokenAccount(user, vault.assetMint, vault.assetTokenProgram),
-        user,
-        vault.assetMint,
-        vault.assetTokenProgram,
-      ),
-    );
-  }
-  return ixs;
 }

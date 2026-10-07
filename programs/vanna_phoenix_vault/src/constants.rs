@@ -45,14 +45,5 @@ pub const JUPITER_PROGRAM_ID: Pubkey = pubkey!("JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZ
 /// leave.
 pub const MIN_SLIPPAGE_BPS: u16 = 10;
 
-/// How far a deposit without a swap may be from the vault's asset/USDC mix, as a share of its
-/// value. A deposit off the mix would trade the vault's hedged holding at Phoenix's mark,
-/// which can sit away from the asset's spot price; a single-asset deposit swaps at spot.
-pub const MIX_TOLERANCE_BPS: u128 = 500;
-
 /// The keeper's rebalancing volume is limited per this many seconds.
 pub const REBALANCE_WINDOW_SECONDS: i64 = 86_400;
-
-/// A swap may spend up to this much less than planned: the client builds its route before
-/// the transaction runs.
-pub const SWAP_TOLERANCE_BPS: u128 = 100;

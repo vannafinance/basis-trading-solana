@@ -20,10 +20,8 @@ fn tsla_caps_open_interest_deposit_size_and_position() {
     let mut env = Env::new();
     env.update_vault(Asset::Tsla, mainnet_params(Asset::Tsla));
     let fay = env.add_user("fay", 10 * SOL);
-    env.mint_asset(Asset::Tsla, fay, 1_000 * STOCK);
-    env.mint_usdc(fay, 400_000 * USDC);
-    // 120 TSLAx and $45,840 of margin: about $91,700, under the $100,000 a deposit may add.
-    let chunk = |env: &mut Env| env.deposit(Asset::Tsla, "fay", 120 * STOCK, 45_840 * USDC);
+    // $91,680: 120 TSLAx and $45,840 of margin, under the $100,000 a deposit may add.
+    let chunk = |env: &mut Env| env.deposit(Asset::Tsla, "fay", 91_680 * USDC);
 
     // Alone, the vault would be every short on the market.
     assert!(failed_with(chunk(&mut env), "OpenInterestShareReached"));
@@ -38,7 +36,7 @@ fn tsla_caps_open_interest_deposit_size_and_position() {
 
     assert!(
         failed_with(
-            env.deposit(Asset::Tsla, "fay", 150 * STOCK, 57_300 * USDC),
+            env.deposit(Asset::Tsla, "fay", 114_600 * USDC),
             "DepositTooLarge"
         ),
         "$114,600 at once"
@@ -65,7 +63,7 @@ fn tsla_caps_open_interest_deposit_size_and_position() {
         },
     );
     assert!(failed_with(
-        env.deposit(Asset::Tsla, "fay", STOCK, 382 * USDC),
+        env.deposit(Asset::Tsla, "fay", 764 * USDC),
         "MaxPositionReached"
     ));
 
@@ -80,11 +78,11 @@ fn tsla_caps_open_interest_deposit_size_and_position() {
 fn phoenix_counts_only_500_sol_per_trader_so_the_sol_vault_stops_at_450() {
     // Without the cap: SOL past Phoenix's 500 per trader is held but not counted as margin.
     let mut env = Env::new();
-    env.add_user("gus", 2_000 * SOL);
-    expect(env.deposit(Asset::Sol, "gus", 500 * SOL, 0));
-    let at_500 = env.print(Asset::Sol, "gus deposits 500 SOL");
-    expect(env.deposit(Asset::Sol, "gus", 100 * SOL, 0));
-    let at_600 = env.print(Asset::Sol, "gus deposits 100 SOL more");
+    env.add_user("gus", 10 * SOL);
+    expect(env.deposit(Asset::Sol, "gus", 75_000 * USDC));
+    let at_500 = env.print(Asset::Sol, "gus deposits $75,000 (500 SOL)");
+    expect(env.deposit(Asset::Sol, "gus", 15_000 * USDC));
+    let at_600 = env.print(Asset::Sol, "gus deposits $15,000 (100 SOL) more");
     let notional = |v: &VaultView| -v.position_lots as f64 / 100.0 * v.mark_usd;
     eprintln!(
         "margin: ${:.0} on a ${:.0} short ({:.1}%) -> ${:.0} on ${:.0} ({:.1}%): the 100 SOL added no margin",
@@ -101,28 +99,28 @@ fn phoenix_counts_only_500_sol_per_trader_so_the_sol_vault_stops_at_450() {
     let mut env = Env::new();
     env.update_vault(Asset::Sol, mainnet_params(Asset::Sol));
     env.outside_trade(Asset::Sol, true, 200_000);
-    let gus = env.add_user("gus", 2_000 * SOL);
-    expect(env.deposit(Asset::Sol, "gus", 450 * SOL, 0));
-    env.print(Asset::Sol, "gus deposits 450 SOL");
+    let gus = env.add_user("gus", 10 * SOL);
+    expect(env.deposit(Asset::Sol, "gus", 67_500 * USDC));
+    env.print(Asset::Sol, "gus deposits $67,500 (450 SOL)");
     assert!(failed_with(
-        env.deposit(Asset::Sol, "gus", SOL, 0),
+        env.deposit(Asset::Sol, "gus", 150 * USDC),
         "MaxPositionReached"
     ));
     let shares = env.shares(Asset::Sol, gus);
     expect(env.withdraw(Asset::Sol, "gus", shares / 10));
-    expect(env.deposit(Asset::Sol, "gus", 10 * SOL, 0));
+    expect(env.deposit(Asset::Sol, "gus", 1_500 * USDC));
 }
 
 #[test]
 fn the_keeper_closes_deposits_when_funding_turns_and_reopens_them() {
     let mut env = Env::new();
-    let hal = env.add_user("hal", 100 * SOL);
-    expect(env.deposit(Asset::Sol, "hal", 10 * SOL, 0));
+    let hal = env.add_user("hal", 10 * SOL);
+    expect(env.deposit(Asset::Sol, "hal", 1_500 * USDC));
 
     let keeper = env.keeper_seed();
     expect(env.set_deposits_open(keeper, Asset::Sol, false));
     assert!(failed_with(
-        env.deposit(Asset::Sol, "hal", 10 * SOL, 0),
+        env.deposit(Asset::Sol, "hal", 1_500 * USDC),
         "DepositsClosed"
     ));
     assert!(failed_with(
@@ -134,5 +132,5 @@ fn the_keeper_closes_deposits_when_funding_turns_and_reopens_them() {
     expect(env.withdraw(Asset::Sol, "hal", shares / 2));
 
     expect(env.set_deposits_open(keeper, Asset::Sol, true));
-    expect(env.deposit(Asset::Sol, "hal", 10 * SOL, 0));
+    expect(env.deposit(Asset::Sol, "hal", 1_500 * USDC));
 }

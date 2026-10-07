@@ -380,27 +380,20 @@ export type VannaPhoenixVault = {
           "writable": true
         },
         {
-          "name": "userAsset",
-          "docs": [
-            "The user's asset tokens (spot vaults). The SOL vault takes lamports from `user`."
-          ],
-          "writable": true,
-          "optional": true
-        },
-        {
           "name": "userUsdc",
           "docs": [
-            "The user's USDC, when the deposit brings margin."
+            "The user's USDC: deposits are USDC only."
           ],
-          "writable": true,
-          "optional": true
+          "writable": true
         },
         {
-          "name": "swapProgram",
-          "optional": true
+          "name": "swapProgram"
         },
         {
           "name": "vaultWsol",
+          "docs": [
+            "vault's swap."
+          ],
           "writable": true,
           "optional": true
         },
@@ -427,10 +420,6 @@ export type VannaPhoenixVault = {
           "type": "u8"
         },
         {
-          "name": "assetAmount",
-          "type": "u64"
-        },
-        {
           "name": "usdcAmount",
           "type": "u64"
         },
@@ -441,10 +430,8 @@ export type VannaPhoenixVault = {
         {
           "name": "route",
           "type": {
-            "option": {
-              "defined": {
-                "name": "swapRoute"
-              }
+            "defined": {
+              "name": "swapRoute"
             }
           }
         }
@@ -946,7 +933,7 @@ export type VannaPhoenixVault = {
         {
           "name": "user",
           "docs": [
-            "Receives the SOL vault's payout as lamports."
+            "Gets back the rent of the wrapped-SOL account the SOL vault sells through."
           ],
           "writable": true,
           "signer": true
@@ -1169,20 +1156,11 @@ export type VannaPhoenixVault = {
           }
         },
         {
-          "name": "userAsset",
-          "docs": [
-            "Receives a spot vault's asset."
-          ],
-          "writable": true,
-          "optional": true
-        },
-        {
           "name": "userUsdc",
           "docs": [
-            "Receives the USDC part of the payout."
+            "Receives the payout: withdrawals are USDC only."
           ],
-          "writable": true,
-          "optional": true
+          "writable": true
         },
         {
           "name": "swapProgram",
@@ -1190,6 +1168,9 @@ export type VannaPhoenixVault = {
         },
         {
           "name": "vaultWsol",
+          "docs": [
+            "vault's swap."
+          ],
           "writable": true,
           "optional": true
         },
@@ -1220,20 +1201,8 @@ export type VannaPhoenixVault = {
           "type": "u64"
         },
         {
-          "name": "minAssetOut",
-          "type": "u64"
-        },
-        {
           "name": "minUsdcOut",
           "type": "u64"
-        },
-        {
-          "name": "receive",
-          "type": {
-            "defined": {
-              "name": "receive"
-            }
-          }
         },
         {
           "name": "route",
@@ -1459,8 +1428,8 @@ export type VannaPhoenixVault = {
     },
     {
       "code": 6020,
-      "name": "depositOffMix",
-      "msg": "A deposit without a swap must match the vault's asset and USDC mix"
+      "name": "unsupportedRoute",
+      "msg": "The swap route is not a Jupiter route the vault can size"
     },
     {
       "code": 6021,
@@ -1702,9 +1671,8 @@ export type VannaPhoenixVault = {
           {
             "name": "targetMarginBps",
             "docs": [
-              "USDC margin a single-asset deposit sets aside per dollar of asset, in bps: 10,000",
-              "(1x) splits a deposit half asset, half USDC. 0 for the SOL vault, whose SOL is its own",
-              "margin."
+              "USDC margin a deposit keeps per dollar of asset it buys, in bps: 10,000 (1x) splits a",
+              "deposit half asset, half USDC. 0 for the SOL vault, whose SOL is its own margin."
             ],
             "type": "u16"
           },
@@ -1793,8 +1761,9 @@ export type VannaPhoenixVault = {
           {
             "name": "swapProgram",
             "docs": [
-              "The swap venue the vault may route single-asset deposits and withdrawals through",
-              "(Jupiter on mainnet)."
+              "The swap venue every deposit buys the asset through and every withdrawal sells it",
+              "through: Jupiter v6. The default key turns swaps off, which stops deposits and every",
+              "withdrawal that has asset to sell."
             ],
             "type": "pubkey"
           },
@@ -1823,11 +1792,14 @@ export type VannaPhoenixVault = {
             "type": "pubkey"
           },
           {
-            "name": "assetAmount",
+            "name": "usdcAmount",
             "type": "u64"
           },
           {
-            "name": "usdcAmount",
+            "name": "assetBought",
+            "docs": [
+              "The asset the deposit's USDC bought."
+            ],
             "type": "u64"
           },
           {
@@ -1936,26 +1908,6 @@ export type VannaPhoenixVault = {
           {
             "name": "positionLots",
             "type": "i64"
-          }
-        ]
-      }
-    },
-    {
-      "name": "receive",
-      "docs": [
-        "How a withdrawal is paid."
-      ],
-      "type": {
-        "kind": "enum",
-        "variants": [
-          {
-            "name": "both"
-          },
-          {
-            "name": "asset"
-          },
-          {
-            "name": "usdc"
           }
         ]
       }
@@ -2128,14 +2080,23 @@ export type VannaPhoenixVault = {
           },
           {
             "name": "payoutUsd",
+            "docs": [
+              "What left the vault for the burned shares, at the mark price."
+            ],
             "type": "u64"
           },
           {
-            "name": "assetOut",
+            "name": "assetSold",
+            "docs": [
+              "The leaver's part of the asset, sold for USDC."
+            ],
             "type": "u64"
           },
           {
             "name": "usdcOut",
+            "docs": [
+              "The USDC the leaver received."
+            ],
             "type": "u64"
           },
           {

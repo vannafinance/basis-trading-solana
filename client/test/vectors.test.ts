@@ -78,7 +78,6 @@ async function main() {
     await depositInstruction(program, {
       vault,
       user,
-      assetAmount: 123_456n,
       usdcAmount: 7_890_000n,
       minShares: 42n,
       route: { args: { accounts: 3, data: Buffer.from([9, 8, 7]) }, metas: [], lookupTables: [], inAmount: 0n, outAmount: 0n, quote: null },
@@ -92,9 +91,7 @@ async function main() {
       vault,
       user,
       shares: 1_000_000n,
-      minAssetOut: 5n,
       minUsdcOut: 6n,
-      receive: "usdc",
       phoenix,
     }),
     vectors.withdraw as any,

@@ -27,16 +27,17 @@ The client is checked byte for byte against the program's own Rust types (`npm t
 
 ## 1. What the frontend does
 
-There is one vault per asset: SOL, ETH, BTC, TSLA and META. A user deposits and receives the
-vault's **shares**, an SPL token with 6 decimals. The vault holds the asset and an equal short on
-Phoenix perps, so the share price stays flat in dollars and grows with funding.
+There is one vault per asset: SOL, ETH, BTC, TSLA and META. A user deposits **USDC** and
+receives the vault's **shares**, an SPL token with 6 decimals, and withdraws **USDC**. The vault
+buys the asset with the deposit through Jupiter and holds it with an equal short on Phoenix
+perps, so the share price stays flat in dollars and grows with funding.
 
 | User action | Client function | What happens on-chain, in one transaction |
 |---|---|---|
 | See a vault | `fetchVault`, `getVaultState` | Nothing; reads accounts and simulates Phoenix's views |
 | See their position | `getUserPosition` | Nothing; reads their share balance |
-| Deposit | `prepareDeposit` → wallet signs | Funds in; swap through Jupiter if needed; USDC margin to Phoenix; short opened; shares minted |
-| Withdraw | `prepareWithdraw` → wallet signs | Their part of the short closed; shares burned; asset and/or USDC paid out |
+| Deposit | `prepareDeposit` → wallet signs | USDC in; part of it buys the asset through Jupiter; the rest is USDC margin on Phoenix; short opened; shares minted |
+| Withdraw | `prepareWithdraw` → wallet signs | Their part of the short closed; their part of the asset sold through Jupiter; shares burned; USDC paid out |
 
 Deposits and withdrawals settle at once: there are no requests, queues or lockups. Each user
 pays their own trading costs.
@@ -136,7 +137,7 @@ is in it, so nothing else has to be derived. Fields the UI uses:
 | `afterHoursDeposits` | Whether deposits stay open while a stock market is after hours (`false` for stocks) |
 | `maxDepositUsd` | The most value one deposit may add (USD, 6 dp) |
 | `maxPositionUsd`, `maxOiShareBps`, `maxAssetUnits` | The vault's caps (the program enforces them) |
-| `targetMarginBps` | USDC per dollar of asset in the vault's mix: `10000` for spot vaults (1:1), `0` for SOL |
+| `targetMarginBps` | USDC margin a deposit keeps per dollar of asset it buys: `10000` for spot vaults (half and half), `0` for SOL (all of it buys SOL) |
 | `slippageBps` | The vault's price band for its own trades (100 = 1%) |
 
 ### `getVaultState(connection, vault, payer, phoenix?): Promise<VaultState>`
@@ -188,39 +189,31 @@ the UI can rely on it and use the fields above only to explain why.
 
 ## 5. Deposit
 
-### What users can bring
+Deposits are **USDC only**. Part of the USDC buys the asset at spot through Jupiter and the rest
+stays as the short's margin on Phoenix:
 
-| User brings | How the vault takes it | Client call |
+| Vault | $1,000 deposit | Client call |
 |---|---|---|
-| USDC only | Swaps part to the asset through Jupiter: half for spot vaults (1x mix), all of it for SOL | `prepareDeposit(ctx, user, 0n, usdc)` |
-| The asset only | Spot vaults swap half to USDC margin; SOL needs no swap | `prepareDeposit(ctx, user, asset, 0n)` |
-| Both, at the vault's mix | Taken as they come, no swap | `prepareDeposit(ctx, user, asset, mixUsdc(...))` |
+| ETH, BTC, TSLA, META | $500 buys the asset, $500 is margin (1x) | `prepareDeposit(ctx, user, 1_000_000_000n)` |
+| SOL | all $1,000 buys SOL, which is Phoenix collateral itself | the same |
 
-A deposit of both must be within 5% of the vault's mix, or the program refuses it
-(`DepositOffMix`): off the mix, the vault would trade its hedged asset at Phoenix's mark instead
-of the spot price. Use `mixUsdc` to fill in the second amount:
-
-```ts
-const usdc = mixUsdc(assetAmount, state.tokenPrice, vault.assetDecimals, vault.targetMarginBps);
-```
-
-### `prepareDeposit(ctx, user, assetAmount, usdcAmount, slippageBps = 50)`
+### `prepareDeposit(ctx, user, usdcAmount, slippageBps = 50)`
 
 It does the following:
-1. For a single asset, plans the swap amount (`planDepositSwap`) and fetches a Jupiter route
-   built for the vault authority (`jupiterRoute`).
+1. Works out the USDC that buys the asset (`depositSwapAmount`: a fixed fraction, so exact) and
+   fetches a Jupiter route for it, built for the vault authority (`jupiterRoute`).
 2. Builds the deposit and simulates it. This gives the exact shares, or the program's error.
 3. Rebuilds with `minShares = shares × (1 − slippageBps)` and returns a transaction for the
    wallet.
 
-It returns `{ transaction, shares, valueUsd, preview, route }`, or throws `VaultActionError`,
-whose `preview.error` holds the program error (section 9).
+It returns `{ transaction, shares, valueUsd, assetBought, preview, route }`, or throws
+`VaultActionError`, whose `preview.error` holds the program error (section 9).
 
 ```ts
 import { prepareDeposit, VaultActionError } from "@vanna/phoenix-vault-client";
 
 try {
-  const { transaction, shares, valueUsd } = await prepareDeposit(ctx, wallet.publicKey, 0n, 1_000n * 1_000_000n);
+  const { transaction, shares, valueUsd } = await prepareDeposit(ctx, wallet.publicKey, 1_000n * 1_000_000n);
   // Show: "You deposit $1,000.00 → about {fmt(shares,6)} shares worth ${fmt(valueUsd,6)}"
   const signature = await wallet.sendTransaction(transaction, connection);
   await connection.confirmTransaction(signature, "confirmed");
@@ -235,39 +228,35 @@ try {
 it.
 
 The program creates the user's share token account if needed; the user pays its rent
-(about 0.002 SOL) once. A SOL deposit takes lamports straight from the wallet, so leave about
-0.01 SOL for fees and rent.
+(about 0.002 SOL) once. A SOL-vault deposit also opens and closes a wrapped-SOL account for the
+swap; its rent goes back to the user in the same transaction. Leave about 0.01 SOL for fees and
+rent.
 
 ## 6. Withdraw
 
-### Payout options (`receive`)
+Withdrawals pay **USDC only**. The vault closes the user's part of the short, sells their part
+of the asset through Jupiter and pays that USDC plus their part of the vault's USDC.
 
-| `receive` | User gets | Swap |
-|---|---|---|
-| `"both"` | Their part of the asset plus USDC. Spot vaults pay about half and half; the SOL vault pays SOL first, then USDC | None: cheapest |
-| `"usdc"` | Everything in USDC | The asset part is sold through Jupiter |
-| `"asset"` | Everything in the asset | The USDC part is bought through Jupiter |
-
-### `prepareWithdraw(ctx, user, shares, receive, slippageBps = 50)`
+### `prepareWithdraw(ctx, user, shares, slippageBps = 50)`
 
 It does the following:
-1. Simulates a `"both"` withdrawal to learn exactly what the vault will pay: `assetOut`,
-   `usdcOut`.
-2. For `"usdc"` or `"asset"`, fetches a Jupiter route for slightly less than the amount to swap
-   (99.95% for a spot vault's asset, 99.6% otherwise). The vault decides the amount inside the
-   transaction, and the route may not spend more. Whatever the route leaves unsold is paid as
-   it is, usually a few cents of the other token.
-3. Simulates again, sets `minAssetOut` and `minUsdcOut` from the result less `slippageBps`, and
-   returns the transaction.
-4. Prepends instructions that create the user's USDC and asset token accounts if they are
-   missing. Each costs the user about 0.002 SOL of rent the first time.
+1. Estimates the asset the withdrawal sells (`withdrawSwapEstimate`): a spot vault's share of
+   its tokens, or for the SOL vault the payout in SOL less about 0.1% for closing the short.
+2. Fetches a Jupiter route for that amount. The vault decides the exact amount inside the
+   transaction (it depends on the user's own trade) and **resizes the route to it**, so the
+   estimate only has to be close and nothing is left unsold.
+3. Simulates the withdrawal, sets `minUsdcOut` from the result less `slippageBps`, and returns
+   the transaction. If Phoenix lets no asset leave now (the SOL vault's SOL held for USDC it
+   owes), the program answers `SwapNotNeeded` and the client retries without a route.
+4. Prepends an instruction that creates the user's USDC account if it is missing (about
+   0.002 SOL of rent the first time).
 
-It returns `{ transaction, assetOut, usdcOut, payoutUsd, sharesBurned, preview, route }`.
+It returns `{ transaction, usdcOut, assetSold, payoutUsd, sharesBurned, preview, route }`.
 
 ```ts
 const shares = (await getUserPosition(connection, vault, state, wallet.publicKey)).shares;
-const w = await prepareWithdraw(ctx, wallet.publicKey, shares, "usdc");
-// Show: "You receive ${fmt(w.usdcOut, 6)}" (+ fmt(w.assetOut, vault.assetDecimals) of the asset if any)
+const w = await prepareWithdraw(ctx, wallet.publicKey, shares);
+// Show: "You receive ${fmt(w.usdcOut, 6)}"
 if (w.sharesBurned < shares) {
   // Phoenix let only part of the payout leave now (the SOL vault with USDC owed, or Phoenix's
   // withdraw limits): the user keeps the rest of their shares and can withdraw them later.
@@ -275,31 +264,35 @@ if (w.sharesBurned < shares) {
 await wallet.sendTransaction(w.transaction, connection);
 ```
 
-Withdrawals are always open: during pauses, closed deposits, stock after-hours and over caps.
+Withdrawals stay open during pauses, closed deposits, stock after-hours and over caps. They do
+need Jupiter: while Jupiter is down, or if Vanna turns swaps off, withdrawals that have asset to
+sell fail until it is back.
 
 **Large withdrawals.** Each withdrawal closes its share of the short on Phoenix within 1% of the
-mark, all at once, or it fails. If the book is too thin (a large amount, or a stock on a
-weekend), split it into several withdrawals, or use `"both"` to skip the swap. The preview
-fails with Phoenix's error when the size cannot fill.
+mark and sells its asset within 1% of the mark, all at once, or it fails. If the book or the
+pool is too thin (a large amount, or a stock on a weekend), split it into several withdrawals.
+The preview fails with Phoenix's or the vault's error when the size cannot fill.
 
 ## 7. Sending transactions
 
-- **Lookup tables are required.** A deposit or withdrawal names 31–51 accounts, which does not
-  fit Solana's 1,232-byte limit without lookup tables. Pass the vault's table (from config) plus
-  the route's Jupiter tables. `prepareDeposit` and `prepareWithdraw` already do this, and so does
+- **Lookup tables are required.** A deposit or withdrawal names 46–50 accounts with a direct
+  Jupiter route, which does not fit Solana's 1,232-byte limit without lookup tables. Pass the
+  vault's table (from config) plus the route's Jupiter tables. `prepareDeposit` and
+  `prepareWithdraw` already do this, and so does
   `buildTransaction(connection, payer, ixs, tables, options)`.
 
-  | Operation | Accounts | With lookup tables | Compute used |
+  | Operation (direct Jupiter route) | Accounts | With lookup tables | Compute used |
   |---|---|---|---|
-  | SOL deposit | 31 | 343 bytes | 241k |
-  | SOL withdraw | 32 | 345 bytes | 246k |
-  | ETH deposit (ETH + USDC) | 34 | 346 bytes | 246k |
-  | ETH withdraw | 34 | 347 bytes | 272k |
-  | ETH deposit, USDC only (Jupiter) | 47 | 426 bytes | 319k |
-  | TSLA deposit, USDC only (Jupiter) | 51 | 436 bytes | 331k |
+  | SOL deposit | 46 | 415 bytes | 331k |
+  | SOL withdraw | 46 | 416 bytes | 345k |
+  | ETH deposit | 46 | 415 bytes | 318k |
+  | ETH withdraw | 46 | 416 bytes | 332k |
+  | TSLA deposit (Raydium CLMM) | 50 | 425 bytes | 330k |
+  | TSLA withdraw (Raydium CLMM) | 50 | 426 bytes | 359k |
 
-- **Compute budget:** the client sets 400,000 units without a swap and 600,000 with one. Add a
-  priority fee with `tx.microLamportsPerCu`.
+- **Compute budget:** the client sets 600,000 units with a swap (every deposit, and every
+  withdrawal with asset to sell) and 400,000 without. Add a priority fee with
+  `tx.microLamportsPerCu`.
 - **Freshness:** a Jupiter route's pools move quickly. Prepare the transaction when the user
   clicks confirm, not when the page loads, and rebuild it if the blockhash expires (about 60
   seconds). A stale route fails with `SwapAmountOff` or `SwapPriceTooLow`; rebuild and retry.
@@ -315,8 +308,8 @@ them, with field names in camelCase:
 
 | Event | Fields | When |
 |---|---|---|
-| `deposited` | `basisVault, user, assetAmount, usdcAmount, shares, valueUsd, navBeforeUsd, positionLots` | Every deposit |
-| `withdrawn` | `basisVault, user, shares` (burned), `payoutUsd, assetOut, usdcOut, positionLots` | Every withdrawal. `assetOut` and `usdcOut` are what the user actually received |
+| `deposited` | `basisVault, user, usdcAmount, assetBought, shares, valueUsd, navBeforeUsd, positionLots` | Every deposit. `assetBought` is what the USDC bought through Jupiter |
+| `withdrawn` | `basisVault, user, shares` (burned), `payoutUsd, assetSold, usdcOut, positionLots` | Every withdrawal. `usdcOut` is what the user actually received; `assetSold` is their part of the asset that was sold |
 | `swapped` | `basisVault, soldUsdc, spent, received` | Each Jupiter swap inside a deposit or withdrawal |
 | `rebalanced`, `depositsSet` | (keeper) | Funding reinvested, or deposits opened or closed |
 
@@ -341,7 +334,7 @@ Index these with your backend or a webhook service rather than in the browser.
 | 6015 | MarketAfterHours | "The TSLA/META market is closed; deposits reopen Sunday 8pm ET" | Disable deposits for stocks |
 | 6017 | VaultInsolvent | "Deposits unavailable" | Disable deposits; alert ops |
 | 6019 | MultiplierChanging | "Deposits pause around a stock dividend or split" | Disable deposits for a few days |
-| 6020 | DepositOffMix | "Use a single asset, or the suggested split" | Use `mixUsdc`, or one asset |
+| 6020 | UnsupportedRoute | "Swap failed" | Client bug: the route is not Jupiter's `route` or `shared_accounts_route` |
 | 6021 | MarginTooThin | "The vault cannot take this deposit right now" | Retry later; alert ops |
 | 6022 | SharesTooLow | "Price moved; try again" | Rebuild with a fresh preview |
 | 6023 | PayoutTooLow | "Price moved; try again" | Rebuild with a fresh preview |
@@ -350,9 +343,9 @@ Index these with your backend or a webhook service rather than in the browser.
 | 6026 | NotEnoughShares | "Not enough shares" | Validate against the balance |
 | 6027 | PriceOutOfBand | "Price moved; try again" | Retry |
 | 6029 | InvalidSwapAccounts | "Swap failed" | Rebuild the route |
-| 6030 | SwapNotNeeded | — | Client bug: a route was sent for a deposit at the mix |
+| 6030 | SwapNotNeeded | — | A withdrawal sent a route but Phoenix lets no asset leave now: resend without one (`prepareWithdraw` does) |
 | 6031 | SwapAmountOff | "Price moved; try again" | Rebuild with a fresh route |
-| 6032 | SwapPriceTooLow | "Swap price too far from the market; try again or use another payout" | Retry, or `"both"` |
+| 6032 | SwapPriceTooLow | "Swap price too far from the market; try again or use a smaller amount" | Retry, or split the amount |
 | 6033 | SwapMovedVaultFunds | "Swap failed" | Report: bad route |
 | others | InvalidMint, InvalidTokenAccount, InvalidPhoenixAccount, MissingPhoenixAccounts, WrongVaultKind, … | "Something went wrong" | Client or config bug: refresh `fetchPhoenixKeys` and the vault |
 
@@ -363,10 +356,10 @@ internal checks, which users do not trigger.
 
 | Vault | Asset | Notes |
 |---|---|---|
-| SOL | Native SOL (lamports) | The SOL is the short's margin, so a SOL-only deposit needs no swap and USDC-only swaps all of it to SOL. Capped at 450 SOL by Phoenix's 500-SOL limit per trader. Withdrawals pay SOL first. If the vault owes USDC after a rally, a payout can be partial (`sharesBurned < shares`) until the keeper settles it |
-| ETH | Wormhole ETH `7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs` | Not native ETH: users bridge or buy it on Solana. USDC-only deposits avoid this |
+| SOL | Native SOL (lamports) | The SOL is the short's margin, so all of a deposit buys SOL. Capped at 450 SOL by Phoenix's 500-SOL limit per trader. A withdrawal takes SOL out first and sells it. If the vault owes USDC after a rally, a payout can be partial (`sharesBurned < shares`) until the keeper settles it |
+| ETH | Wormhole ETH `7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs` | The vault holds Wormhole ETH, not native ETH; users never touch it, they deposit and withdraw USDC |
 | BTC | cbBTC `cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij` | As ETH |
-| TSLA, META | xStocks `XsDoVfqe…`, `Xsa62P5m…` (Token-2022) | Use the Token-2022 program for token accounts (the client does). One METAx is about 1.00285 shares (reinvested dividends); show the token, value it with `tokenPrice`. Deposits are closed after hours (weekends, US holidays) and around large dividends or splits. **xStocks are not offered to US persons; geofence accordingly.** The issuer can pause transfers, which also pauses withdrawals |
+| TSLA, META | xStocks `XsDoVfqe…`, `Xsa62P5m…` (Token-2022) | The vault holds the tokens; users deposit and withdraw USDC. One METAx is about 1.00285 shares (reinvested dividends); value it with `tokenPrice`. Deposits are closed after hours (weekends, US holidays) and around large dividends or splits. **xStocks are not offered to US persons; geofence accordingly.** The issuer can pause transfers, which also pauses withdrawals |
 
 ## 11. Low-level reference
 
@@ -374,12 +367,13 @@ Use these functions instead of the flows if you need full control.
 
 ```ts
 // Instructions
-depositInstruction(program, { vault, user, assetAmount, usdcAmount, minShares, route?, phoenix? }): Promise<TransactionInstruction>
-withdrawInstruction(program, { vault, user, shares, minAssetOut, minUsdcOut, receive, route?, phoenix? }): Promise<TransactionInstruction>
-withdrawSetupInstructions(vault, user): TransactionInstruction[]       // create the payout token accounts
+depositInstruction(program, { vault, user, usdcAmount, minShares, route, phoenix? }): Promise<TransactionInstruction>
+withdrawInstruction(program, { vault, user, shares, minUsdcOut, route?, phoenix? }): Promise<TransactionInstruction>
+withdrawSetupInstructions(vault, user): TransactionInstruction[]       // create the user's USDC account
 
 // Swaps
-planDepositSwap(price, decimals, targetMarginBps, assetAmount, usdcAmount): { sell: "usdc" | "asset"; amount } | null
+depositSwapAmount(usdcAmount, targetMarginBps): bigint                  // the USDC that buys the asset
+withdrawSwapEstimate(kind, shares, supply, assetUnits, nav, tokenPrice, decimals): bigint  // about the asset sold
 jupiterRoute(vault, sell, amount, { apiBase?, apiKey?, slippageBps?, maxAccounts?, dexes? }): Promise<SwapRoute>
 
 // Transactions
@@ -389,7 +383,6 @@ parseEvents(program, logs); vaultErrorFromLogs(logs)
 
 // Math (the program's own arithmetic, in bigint)
 tokenPrice(markTicks, tickSize, baseLotDecimals, multiplier?); usdValue; tokensForUsd
-mixUsdc(assetAmount, price, decimals, targetMarginBps); onMix(...)
 sharesForValue(value, nav, supply); shareValue(shares, nav, supply); lessBps(amount, bps)
 
 // Addresses
@@ -402,29 +395,29 @@ authorityAddress(basisVault, nonce); traderAccountAddress(authority); userShareA
 If you build instructions without the client (for example from another language), use the
 IDL. The account lists below are exactly what `program.methods.deposit(...)` encodes.
 
-**`deposit(gti: u8, atb: u8, asset_amount: u64, usdc_amount: u64, min_shares: u64, route: Option<SwapRoute>)`**
+**`deposit(gti: u8, atb: u8, usdc_amount: u64, min_shares: u64, route: SwapRoute)`**
 
 | # | Account | Notes |
 |---|---|---|
 | 1 | `user` | Signer, writable |
 | 2–25 | `core` (24 accounts): `config, basis_vault, authority, share_mint, usdc_mint, phoenix_mint, vault_usdc, vault_phoenix, vault_asset?, asset_mint, asset_token_program, trader_account, [phoenix_program, log_authority, global_config, hawkeye_program, ember_program, ember_state, ember_vault], perp_asset_map, orderbook, spline_collection, withdraw_queue, global_vault` | All from `VaultInfo` and the constants. `vault_asset` is empty (the program id) for SOL |
 | 26 | `user_shares` | The user's share ATA (SPL Token); created by the program if missing |
-| 27 | `user_asset?` | The user's asset ATA under the asset's token program, when `asset_amount > 0` (spot vaults) |
-| 28 | `user_usdc?` | The user's USDC ATA, when `usdc_amount > 0` |
-| 29 | `swap_program?` | Jupiter v6, with a route |
-| 30 | `vault_wsol?` | The authority's wrapped-SOL ATA, for SOL-vault routes |
-| 31–33 | `token_program, associated_token_program, system_program` | |
+| 27 | `user_usdc` | The user's USDC ATA |
+| 28 | `swap_program` | Jupiter v6 |
+| 29 | `vault_wsol?` | The authority's wrapped-SOL ATA, for the SOL vault |
+| 30–32 | `token_program, associated_token_program, system_program` | |
 | remaining | Phoenix's global trader index accounts (`gti` of them) and active trader buffer accounts (`atb`), writable; then the route's accounts (`route.accounts` of them) as Jupiter returns them | |
 
 An absent optional account (`?`) is passed as the program's own id, as Anchor does.
 
-`SwapRoute { accounts: u8, data: Vec<u8> }`: Jupiter's `swapInstruction.data`, and the number
-of its accounts appended to `remainingAccounts`, with the vault authority's signer flag
-cleared.
+`SwapRoute { accounts: u8, data: Vec<u8> }`: Jupiter's `swapInstruction.data` (a `route` or
+`shared_accounts_route` instruction), and the number of its accounts appended to
+`remainingAccounts`, with the vault authority's signer flag cleared. The vault rewrites the
+route's input amount (and scales its quoted output) to the exact amount it sells.
 
-**`withdraw(gti, atb, shares: u64, min_asset_out: u64, min_usdc_out: u64, receive: Receive, route: Option<SwapRoute>)`**:
-the same accounts as `deposit`; `user_usdc` is always passed. `Receive` is
-`{ both: {} } | { asset: {} } | { usdc: {} }`.
+**`withdraw(gti, atb, shares: u64, min_usdc_out: u64, route: Option<SwapRoute>)`**: the same
+accounts as `deposit`; `swap_program` and `vault_wsol` are passed only with a route. A route is
+required exactly when the withdrawal has asset to sell.
 
 **Keeper and admin instructions** (not for the user frontend): `rebalance`,
 `set_deposits_open`, `update_vault`, `create_vault`, `set_config`, `initialize`. See the README.
@@ -465,5 +458,6 @@ the same accounts as `deposit`; `user_usdc` is always passed. `Receive` is
 - Phoenix runs only on mainnet, so there is no devnet. Integrate against mainnet with
   `prepareDeposit` and `prepareWithdraw`: they simulate without sending, so a page can run
   every check with no funds at risk. Then send small real amounts.
-- The program's own test suite (65 tests: real Phoenix, Jupiter, Orca and Raydium programs in
-  LiteSVM) covers the on-chain side: `cargo test -p vanna_phoenix_vault`.
+- The program's own test suite (64 tests: real Phoenix, Jupiter, Orca and Raydium programs in
+  LiteSVM, and a mock Jupiter where tests move prices) covers the on-chain side:
+  `cargo test -p vanna_phoenix_vault`.

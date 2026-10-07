@@ -13,8 +13,9 @@ pub struct VaultCreated {
 pub struct Deposited {
     pub basis_vault: Pubkey,
     pub user: Pubkey,
-    pub asset_amount: u64,
     pub usdc_amount: u64,
+    /// The asset the deposit's USDC bought.
+    pub asset_bought: u64,
     pub shares: u64,
     /// Value the deposit added after its own trade (USD, 6 dp).
     pub value_usd: u64,
@@ -28,8 +29,11 @@ pub struct Withdrawn {
     pub basis_vault: Pubkey,
     pub user: Pubkey,
     pub shares: u64,
+    /// What left the vault for the burned shares, at the mark price.
     pub payout_usd: u64,
-    pub asset_out: u64,
+    /// The leaver's part of the asset, sold for USDC.
+    pub asset_sold: u64,
+    /// The USDC the leaver received.
     pub usdc_out: u64,
     pub position_lots: i64,
 }

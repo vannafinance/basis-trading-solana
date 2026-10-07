@@ -9,26 +9,23 @@ use crate::swap::*;
 use anchor_lang::prelude::*;
 use anchor_spl::associated_token::{get_associated_token_address, AssociatedToken};
 use anchor_spl::token::{Token, TokenAccount};
-use anchor_spl::token_interface::TokenAccount as AnyTokenAccount;
 
 #[derive(Accounts)]
 pub struct Withdraw<'info> {
-    /// Receives the SOL vault's payout as lamports.
+    /// Gets back the rent of the wrapped-SOL account the SOL vault sells through.
     #[account(mut)]
     pub user: Signer<'info>,
     pub core: VaultCore<'info>,
     #[account(mut, associated_token::mint = core.share_mint, associated_token::authority = user)]
     pub user_shares: Box<Account<'info, TokenAccount>>,
-    /// Receives a spot vault's asset.
-    #[account(mut, token::mint = core.basis_vault.asset_mint, token::authority = user)]
-    pub user_asset: Option<Box<InterfaceAccount<'info, AnyTokenAccount>>>,
-    /// Receives the USDC part of the payout.
+    /// Receives the payout: withdrawals are USDC only.
     #[account(mut, token::mint = core.usdc_mint, token::authority = user)]
-    pub user_usdc: Option<Box<Account<'info, TokenAccount>>>,
-    /// CHECK: the whitelisted swap venue, for single-asset payouts.
+    pub user_usdc: Box<Account<'info, TokenAccount>>,
+    /// CHECK: the whitelisted swap venue (Jupiter), which sells the leaver's part of the asset.
     #[account(address = core.config.swap_program @ VaultError::InvalidSwapAccounts)]
     pub swap_program: Option<UncheckedAccount<'info>>,
-    /// CHECK: the vault authority's wrapped-SOL account, opened and closed around a SOL swap.
+    /// CHECK: the vault authority's wrapped-SOL account, opened and closed around the SOL
+    /// vault's swap.
     #[account(mut, address = get_associated_token_address(&core.authority.key(), &NATIVE_MINT))]
     pub vault_wsol: Option<UncheckedAccount<'info>>,
     pub token_program: Program<'info, Token>,
@@ -36,31 +33,27 @@ pub struct Withdraw<'info> {
     pub system_program: Program<'info, System>,
 }
 
-/// Burns `shares` and pays out their part of the vault after the leaver's own trade: the
-/// short shrinks with the asset that leaves, and the payout is the NAV after that trade less
-/// the part that stays with the other holders.
+/// Burns `shares` and pays out their part of the vault in USDC, after the leaver's own trade:
+/// the short shrinks with the asset that leaves, and the payout is the NAV after that trade
+/// less the part that stays with the other holders.
 ///
-/// A spot vault pays the leaver's part of its asset tokens and the rest in USDC. The SOL
-/// vault pays in SOL first: its depositors brought SOL, and its USDC is Phoenix margin that
-/// only leaves once the short is gone. When Phoenix lets only part of the payout leave (SOL
-/// that must stay to cover USDC the vault owes, or USDC still held as margin), the leaver
-/// gets that part and burns shares for it alone; they keep the rest.
+/// The leaver's part of the asset is sold for USDC through `route` (resized to the exact
+/// amount, `swap::resize_route`); the rest of the payout is USDC from Phoenix. The leaver
+/// carries the swap's cost, and `min_usdc_out` applies to the USDC they receive. A spot vault
+/// sells the leaver's part of its tokens. The SOL vault takes SOL out first: its USDC is
+/// Phoenix margin that only leaves once the short is gone. When Phoenix lets only part of the
+/// payout leave (SOL that must stay to cover USDC the vault owes, or USDC still held as
+/// margin), the leaver gets that part and burns shares for it alone; they keep the rest.
 ///
-/// `receive` picks a single asset instead: the other part is swapped through `route` and the
-/// leaver carries the swap's cost. `min_asset_out` and `min_usdc_out` apply to what is paid.
-///
-/// Withdrawals have no caps and stay open after hours: holders can always leave. A withdrawal
-/// only ever closes short, its share of it (`VaultCore::close_part`), and does not depend on
-/// Phoenix's market map.
-#[allow(clippy::too_many_arguments)]
+/// Withdrawals have no caps and stay open after hours: holders can always leave while Jupiter
+/// can sell their asset. A withdrawal only ever closes short, its share of it
+/// (`VaultCore::close_part`), and does not depend on Phoenix's market map.
 pub fn withdraw<'info>(
     ctx: Context<'info, Withdraw<'info>>,
     gti: u8,
     atb: u8,
     shares: u64,
-    min_asset_out: u64,
     min_usdc_out: u64,
-    receive: Receive,
     route: Option<SwapRoute>,
 ) -> Result<()> {
     let a = &ctx.accounts;
@@ -133,60 +126,35 @@ pub fn withdraw<'info>(
     let paid = price.usd_value(asset_out as u128, market.decimals, false)? + usdc_out as u128;
     let burned = shares_burned(shares, paid, payout, cost)?;
     require!(burned > 0, VaultError::NothingToWithdraw);
-    // A single-asset payout swaps the other part through the route.
-    let sell = match receive {
-        Receive::Usdc if asset_out > 0 => Some((Sell::Asset, asset_out)),
-        Receive::Asset if usdc_out > 0 => Some((Sell::Usdc, usdc_out)),
-        _ => None,
+    // The leaver's part of the asset is sold; the route is needed exactly then.
+    let route = match (asset_out > 0, route) {
+        (true, None) => return err!(VaultError::InvalidSwapAccounts),
+        (false, Some(_)) => return err!(VaultError::SwapNotNeeded),
+        (_, route) => route,
     };
-    match (&sell, &route) {
-        (Some(_), None) => return err!(VaultError::InvalidSwapAccounts),
-        (None, Some(_)) => return err!(VaultError::SwapNotNeeded),
-        _ => {}
-    }
 
     burn(&share_mint, &user_shares, &user, burned, &[])?;
-    if usdc_out > 0 {
-        trader.withdraw_usdc(&core.ember(), usdc_out, signer)?;
-    }
-    let (mut asset_paid, mut usdc_paid) = (asset_out, usdc_out);
-    let swapped = |(spent, received): (u64, u64), sell: Sell| match sell {
-        Sell::Asset => (asset_out - spent, usdc_out + received),
-        Sell::Usdc => (asset_out + received, usdc_out - spent),
-    };
-    match &core.vault_asset {
-        Some(vault_asset) => {
-            if let (Some((sell, planned)), Some(route)) = (sell, &route) {
-                let accounts = route_accounts(ctx.remaining_accounts, gti, atb, route)?;
-                let fill = core.swap(
-                    a.swap_program.as_ref(),
+    trader.withdraw_usdc(&core.ember(), usdc_out, signer)?;
+    let mut received = 0;
+    if let Some(route) = &route {
+        let accounts = route_accounts(ctx.remaining_accounts, gti, atb, route)?;
+        let venue = a.swap_program.as_ref();
+        received = match &core.vault_asset {
+            Some(vault_asset) => {
+                core.swap(
+                    venue,
                     accounts,
                     route,
-                    sell,
-                    planned,
+                    Sell::Asset,
+                    asset_out,
                     &price,
                     vault_asset,
                     signer,
-                )?;
-                (asset_paid, usdc_paid) = swapped(fill, sell);
+                )?
+                .1
             }
-            if asset_paid > 0 {
-                let receiver = a
-                    .user_asset
-                    .as_ref()
-                    .ok_or(VaultError::InvalidTokenAccount)?;
-                core.transfer_asset(
-                    vault_asset,
-                    receiver.as_ref().as_ref(),
-                    &authority,
-                    asset_paid,
-                    signer,
-                )?;
-            }
-        }
-        None => match (sell, &route) {
-            (Some((sell, planned)), Some(route)) => {
-                let accounts = route_accounts(ctx.remaining_accounts, gti, atb, route)?;
+            None => {
+                // The SOL leaves Phoenix to the authority and is wrapped to be sold.
                 let wsol = wsol_account(&a.vault_wsol)?;
                 create_ata_idempotent(
                     &user,
@@ -197,55 +165,41 @@ pub fn withdraw<'info>(
                     &token_program,
                     &[],
                 )?;
-                if sell == Sell::Asset {
-                    // The SOL leaves Phoenix to the authority and is wrapped to be sold.
-                    trader.withdraw_native_sol(&authority, asset_out, signer)?;
-                    system_transfer(&authority, wsol, asset_out, signer)?;
-                    sync_native(wsol)?;
-                } else {
-                    trader.withdraw_native_sol(&user, asset_out, signer)?;
-                }
-                let fill = core.swap(
-                    a.swap_program.as_ref(),
+                trader.withdraw_native_sol(&authority, asset_out, signer)?;
+                system_transfer(&authority, wsol, asset_out, signer)?;
+                sync_native(wsol)?;
+                let (_, received) = core.swap(
+                    venue,
                     accounts,
                     route,
-                    sell,
-                    planned,
+                    Sell::Asset,
+                    asset_out,
                     &price,
                     wsol,
                     signer,
                 )?;
-                (asset_paid, usdc_paid) = swapped(fill, sell);
-                // Closing the wrapped-SOL account pays the user its SOL and their rent back.
+                // All of it was sold: closing the account pays the user their rent back.
                 close_account(wsol, &user, &authority, signer)?;
+                received
             }
-            _ => trader.withdraw_native_sol(&user, asset_out, signer)?,
-        },
+        };
     }
-    if usdc_paid > 0 {
-        let receiver = a
-            .user_usdc
-            .as_ref()
-            .ok_or(VaultError::InvalidTokenAccount)?;
-        transfer(
-            &core.vault_usdc,
-            receiver.as_ref().as_ref(),
-            &authority,
-            usdc_paid,
-            signer,
-        )?;
-    }
-    require!(
-        asset_paid >= min_asset_out && usdc_paid >= min_usdc_out,
-        VaultError::PayoutTooLow
-    );
+    let usdc_paid = usdc_out + received;
+    transfer(
+        &core.vault_usdc,
+        a.user_usdc.as_ref().as_ref(),
+        &authority,
+        usdc_paid,
+        signer,
+    )?;
+    require!(usdc_paid >= min_usdc_out, VaultError::PayoutTooLow);
 
     emit!(Withdrawn {
         basis_vault: vault_key,
         user: a.user.key(),
         shares: burned,
         payout_usd: to_u64(paid)?,
-        asset_out: asset_paid,
+        asset_sold: asset_out,
         usdc_out: usdc_paid,
         position_lots: after.position_lots,
     });

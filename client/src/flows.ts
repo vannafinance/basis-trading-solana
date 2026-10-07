@@ -3,12 +3,11 @@
 import { Connection, PublicKey, VersionedTransaction } from "@solana/web3.js";
 import { PHOENIX_MAINNET, PhoenixKeys } from "./constants";
 import { jupiterRoute, JupiterOptions, SwapRoute } from "./jupiter";
-import { lessBps, planDepositSwap } from "./math";
+import { depositSwapAmount, lessBps, withdrawSwapEstimate } from "./math";
 import { getVaultState } from "./state";
 import { buildTransaction, simulate, Simulation, TxOptions } from "./transaction";
 import {
   depositInstruction,
-  Receive,
   VaultInfo,
   VaultProgram,
   withdrawInstruction,
@@ -40,33 +39,27 @@ export class VaultActionError extends Error {
 }
 
 /**
- * A deposit of `assetAmount` and/or `usdcAmount`. Either alone is swapped to the vault's mix
- * through Jupiter; both together are taken as they come and must already be at the mix (use
- * `mixUsdc`). `slippageBps` sets `minShares` below the simulated shares.
+ * A deposit of `usdcAmount` USDC: deposits are USDC only. The part that buys the asset (half
+ * for a spot vault, all of it for SOL) goes through a Jupiter route built for that exact amount.
+ * `slippageBps` sets `minShares` below the simulated shares.
  */
 export async function prepareDeposit(
   ctx: FlowContext,
   user: PublicKey,
-  assetAmount: bigint,
   usdcAmount: bigint,
   slippageBps = 50,
-): Promise<PreparedTransaction & { shares: bigint; valueUsd: bigint }> {
+): Promise<PreparedTransaction & { shares: bigint; valueUsd: bigint; assetBought: bigint }> {
   const phoenix = ctx.phoenix ?? PHOENIX_MAINNET;
-  const single = assetAmount === 0n || usdcAmount === 0n;
-  let route: SwapRoute | undefined;
-  if (single) {
-    // A single asset needs no price to plan: the split is a fixed fraction.
-    const plan = planDepositSwap(1n, ctx.vault.assetDecimals, ctx.vault.targetMarginBps, assetAmount, usdcAmount);
-    if (plan) route = await jupiterRoute(ctx.vault, plan.sell, plan.amount, ctx.jupiter);
-  }
-  const tables = [...ctx.vaultLookupTables, ...(route?.lookupTables ?? [])];
+  const amount = depositSwapAmount(usdcAmount, ctx.vault.targetMarginBps);
+  const route = await jupiterRoute(ctx.vault, "usdc", amount, ctx.jupiter);
+  const tables = [...ctx.vaultLookupTables, ...route.lookupTables];
   const build = async (minShares: bigint) =>
     buildTransaction(
       ctx.connection,
       user,
-      [await depositInstruction(ctx.program, { vault: ctx.vault, user, assetAmount, usdcAmount, minShares, route, phoenix })],
+      [await depositInstruction(ctx.program, { vault: ctx.vault, user, usdcAmount, minShares, route, phoenix })],
       tables,
-      { computeUnits: route ? 600_000 : 400_000, ...ctx.tx },
+      { computeUnits: 600_000, ...ctx.tx },
     );
 
   const preview = await simulate(ctx.connection, ctx.program, await build(0n));
@@ -79,25 +72,25 @@ export async function prepareDeposit(
     route,
     shares,
     valueUsd: BigInt(deposited.data.valueUsd.toString()),
+    assetBought: BigInt(deposited.data.assetBought.toString()),
   };
 }
 
 /**
- * A withdrawal of `shares`. `both` pays the user's part of the asset and USDC as they are; `asset`
- * or `usdc` swaps the other part through Jupiter. The vault decides how much it sells inside the
- * transaction, so the route is built from a simulation, a hair under it; whatever it leaves
- * unsold is paid as it is.
+ * A withdrawal of `shares`, paid in USDC only. The vault sells the user's part of the asset
+ * through Jupiter: the route is built for about that amount (`withdrawSwapEstimate`), and the
+ * vault resizes it to the exact amount inside the transaction, so nothing is left unsold.
+ * `slippageBps` sets `minUsdcOut` below the simulated payout.
  */
 export async function prepareWithdraw(
   ctx: FlowContext,
   user: PublicKey,
   shares: bigint,
-  receive: Receive,
   slippageBps = 50,
-): Promise<PreparedTransaction & { assetOut: bigint; usdcOut: bigint; payoutUsd: bigint; sharesBurned: bigint }> {
+): Promise<PreparedTransaction & { usdcOut: bigint; assetSold: bigint; payoutUsd: bigint; sharesBurned: bigint }> {
   const phoenix = ctx.phoenix ?? PHOENIX_MAINNET;
   const setup = withdrawSetupInstructions(ctx.vault, user);
-  const build = async (r: Receive, route: SwapRoute | undefined, minAsset: bigint, minUsdc: bigint) =>
+  const build = async (route: SwapRoute | undefined, minUsdc: bigint) =>
     buildTransaction(
       ctx.connection,
       user,
@@ -107,9 +100,7 @@ export async function prepareWithdraw(
           vault: ctx.vault,
           user,
           shares,
-          minAssetOut: minAsset,
           minUsdcOut: minUsdc,
-          receive: r,
           route,
           phoenix,
         }),
@@ -118,39 +109,34 @@ export async function prepareWithdraw(
       { computeUnits: route ? 600_000 : 400_000, ...ctx.tx },
     );
 
-  // What the vault pays without a swap.
-  const plain = await simulate(ctx.connection, ctx.program, await build("both", undefined, 0n, 0n));
-  const out = plain.events.find((e) => e.name === "withdrawn");
-  if (!plain.ok || !out) throw new VaultActionError(plain);
-  let assetOut = BigInt(out.data.assetOut.toString());
-  let usdcOut = BigInt(out.data.usdcOut.toString());
-
-  let route: SwapRoute | undefined;
-  if (receive === "usdc" && assetOut > 0n) {
-    // A spot vault's asset part is known exactly; the SOL vault's depends on the trade's cost.
-    const keep = ctx.vault.kind === "spot" ? 9_995n : 9_960n;
-    route = await jupiterRoute(ctx.vault, "asset", (assetOut * keep) / 10_000n, ctx.jupiter);
-  } else if (receive === "asset" && usdcOut > 0n) {
-    route = await jupiterRoute(ctx.vault, "usdc", (usdcOut * 9_960n) / 10_000n, ctx.jupiter);
+  const state = await getVaultState(ctx.connection, ctx.vault, user, phoenix);
+  const estimate = withdrawSwapEstimate(
+    ctx.vault.kind,
+    shares,
+    state.supply,
+    state.assetUnits,
+    state.nav,
+    state.tokenPrice,
+    ctx.vault.assetDecimals,
+  );
+  let route = estimate > 0n ? await jupiterRoute(ctx.vault, "asset", estimate, ctx.jupiter) : undefined;
+  let preview = await simulate(ctx.connection, ctx.program, await build(route, 0n));
+  if (!preview.ok && route && preview.error?.name === "SwapNotNeeded") {
+    // Phoenix lets no asset leave now (the SOL vault's SOL held for USDC it owes): USDC only.
+    route = undefined;
+    preview = await simulate(ctx.connection, ctx.program, await build(route, 0n));
   }
-  const r: Receive = route ? receive : "both";
-  let preview = plain;
-  if (route) {
-    preview = await simulate(ctx.connection, ctx.program, await build(r, route, 0n, 0n));
-    const swapped = preview.events.find((e) => e.name === "withdrawn");
-    if (!preview.ok || !swapped) throw new VaultActionError(preview);
-    assetOut = BigInt(swapped.data.assetOut.toString());
-    usdcOut = BigInt(swapped.data.usdcOut.toString());
-  }
-  const final = preview.events.find((e) => e.name === "withdrawn")!;
+  const out = preview.events.find((e) => e.name === "withdrawn");
+  if (!preview.ok || !out) throw new VaultActionError(preview);
+  const usdcOut = BigInt(out.data.usdcOut.toString());
   return {
-    transaction: await build(r, route, lessBps(assetOut, slippageBps), lessBps(usdcOut, slippageBps)),
+    transaction: await build(route, lessBps(usdcOut, slippageBps)),
     preview,
     route,
-    assetOut,
     usdcOut,
-    payoutUsd: BigInt(final.data.payoutUsd.toString()),
-    sharesBurned: BigInt(final.data.shares.toString()),
+    assetSold: BigInt(out.data.assetSold.toString()),
+    payoutUsd: BigInt(out.data.payoutUsd.toString()),
+    sharesBurned: BigInt(out.data.shares.toString()),
   };
 }
 

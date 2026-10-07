@@ -1,6 +1,6 @@
 // The program's own arithmetic (src/math.rs, src/nav.rs, src/swap.rs), in bigint, so the
 // frontend computes exactly what the program will: USD values have 6 decimals.
-import { BPS, MIX_TOLERANCE_BPS, VIRTUAL_SHARES, VIRTUAL_USD } from "./constants";
+import { BPS, VIRTUAL_SHARES, VIRTUAL_USD } from "./constants";
 
 const pow10 = (n: number) => 10n ** BigInt(n);
 const ceilDiv = (a: bigint, b: bigint) => (a + b - 1n) / b;
@@ -32,53 +32,32 @@ export const tokensForUsd = (usd: bigint, price: bigint, decimals: number) =>
 export type Sell = "usdc" | "asset";
 
 /**
- * How much of a deposit the vault swaps to reach its mix (`swap::plan_deposit_swap`), or null
- * when it is already there. USDC alone swaps `usdc × 10,000 / (10,000 + t)`; the asset alone
- * swaps `asset × t / (10,000 + t)`, with `t` the vault's `targetMarginBps`. Neither depends on
- * the price, so the route can be built for the exact amount.
+ * How much of a USDC deposit buys the asset (`swap::deposit_swap_amount`): all but the margin
+ * the vault keeps, `usdc × 10,000 / (10,000 + t)` with `t` the vault's `targetMarginBps`. Half
+ * at 1x; all of it for the SOL vault (`t` = 0). It does not depend on the price, so the route
+ * can be built for the exact amount.
  */
-export function planDepositSwap(
-  price: bigint,
-  decimals: number,
-  targetMarginBps: number,
-  assetAmount: bigint,
-  usdcAmount: bigint,
-): { sell: Sell; amount: bigint } | null {
-  const t = BigInt(targetMarginBps);
-  let sell: Sell;
-  let amount: bigint;
-  if (assetAmount === 0n) {
-    [sell, amount] = ["usdc", (usdcAmount * BPS) / (BPS + t)];
-  } else if (usdcAmount === 0n) {
-    [sell, amount] = ["asset", (assetAmount * t) / (BPS + t)];
-  } else {
-    const usdc = usdcAmount * BPS;
-    const wanted = usdValue(assetAmount, price, decimals) * t;
-    if (usdc >= wanted) {
-      [sell, amount] = ["usdc", (usdc - wanted) / (BPS + t)];
-    } else {
-      [sell, amount] = ["asset", tokensForUsd((wanted - usdc) / (BPS + t), price, decimals)];
-    }
-  }
-  return amount === 0n ? null : { sell, amount };
-}
+export const depositSwapAmount = (usdcAmount: bigint, targetMarginBps: number) =>
+  (usdcAmount * BPS) / (BPS + BigInt(targetMarginBps));
 
-/** The USDC that goes with `assetAmount` in a deposit at the vault's mix (no swap needed). */
-export const mixUsdc = (assetAmount: bigint, price: bigint, decimals: number, targetMarginBps: number) =>
-  (usdValue(assetAmount, price, decimals) * BigInt(targetMarginBps)) / BPS;
-
-/** Whether a deposit without a route is close enough to the mix for the program (5%). */
-export function onMix(
-  price: bigint,
+/**
+ * About how much of the asset a withdrawal of `shares` sells: a spot vault's part of its
+ * tokens; for the SOL vault, the payout in SOL less about 0.1% for closing its part of the
+ * short. The vault resizes the route to the exact amount, so this only has to be close.
+ */
+export function withdrawSwapEstimate(
+  kind: "nativeSol" | "spot",
+  shares: bigint,
+  supply: bigint,
+  assetUnits: bigint,
+  nav: bigint,
+  tokenPrice: bigint,
   decimals: number,
-  targetMarginBps: number,
-  assetAmount: bigint,
-  usdcAmount: bigint,
-): boolean {
-  const plan = planDepositSwap(price, decimals, targetMarginBps, assetAmount, usdcAmount);
-  if (!plan) return true;
-  const off = plan.sell === "usdc" ? plan.amount : usdValue(plan.amount, price, decimals, true);
-  return off * BPS <= (usdValue(assetAmount, price, decimals) + usdcAmount) * MIX_TOLERANCE_BPS;
+): bigint {
+  if (supply === 0n) return 0n;
+  if (kind === "spot") return (assetUnits * shares) / supply;
+  const payout = (((nav * shares) / supply) * 999n) / 1_000n;
+  return tokensForUsd(payout, tokenPrice, decimals);
 }
 
 /** Shares a deposit adding `value` (USD, 6 dp) mints in a vault worth `nav` with `supply`. */

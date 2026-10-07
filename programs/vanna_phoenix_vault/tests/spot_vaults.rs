@@ -1,11 +1,12 @@
 //! The ETH and BTC vaults: Phoenix does not take ETH or BTC as collateral, so the vault holds
-//! the asset as tokens and posts USDC as the short's margin. At 1x margin a deposit is half
-//! asset and half USDC: someone with 10 ETH swaps 5 to USDC first, and the vault ends up
-//! holding 5 ETH and short 5 ETH.
+//! the asset as tokens and posts USDC as the short's margin. At 1x margin half of a USDC
+//! deposit buys the asset and half stays as margin: $35,000 at $3,500 is 5 ETH held, 5 ETH
+//! short and $17,500 of margin.
 
 use crate::env::*;
 use vanna_phoenix_vault::events::{Deposited, Withdrawn};
 use vanna_phoenix_vault::instructions::VaultParams;
+use vanna_phoenix_vault::swap::Sell;
 
 fn spot_params() -> VaultParams {
     VaultParams {
@@ -15,25 +16,23 @@ fn spot_params() -> VaultParams {
 }
 
 #[test]
-fn ten_eth_of_value_is_five_eth_held_and_five_eth_short() {
+fn usdc_in_is_half_eth_held_and_short_half_margin() {
     let mut env = Env::new();
     env.update_vault(Asset::Eth, spot_params());
     let carol = env.add_user("carol", 10 * SOL);
-    // Carol came with 10 ETH and swapped 5 of them to USDC at $3,500.
-    env.mint_asset(Asset::Eth, carol, 5 * ETH);
-    env.mint_usdc(carol, 17_500 * USDC);
 
     let meta = env
-        .deposit(Asset::Eth, "carol", 5 * ETH, 17_500 * USDC)
+        .deposit(Asset::Eth, "carol", 35_000 * USDC)
         .unwrap_or_else(|l| panic!("{}", l.join("\n")));
     let e = &events::<Deposited>(&meta)[0];
-    let v = env.print(Asset::Eth, "carol deposits 5 ETH + $17,500");
+    let v = env.print(Asset::Eth, "carol deposits $35,000");
     eprintln!(
         "deposit: {} compute units, {:.2} shares",
         meta.compute_units_consumed,
         usd(e.shares)
     );
 
+    assert_eq!(e.asset_bought, 5 * ETH, "$17,500 buys 5 ETH");
     assert_eq!(v.asset_units, 5 * ETH, "the vault holds 5 ETH as tokens");
     assert_eq!(
         v.position_lots, -5_000,
@@ -41,32 +40,46 @@ fn ten_eth_of_value_is_five_eth_held_and_five_eth_short() {
     );
     assert!(
         v.collateral_usd > 17_490.0,
-        "the USDC is the short's margin on Phoenix"
+        "the other $17,500 is the short's margin on Phoenix"
     );
     assert!(
         v.nav_usd > 34_980.0 && v.nav_usd < 35_000.0,
         "nav {}",
         v.nav_usd
     );
-    assert_eq!(env.asset_balance(Asset::Eth, carol), 0);
     assert_eq!(env.usdc(carol), 0);
 }
 
 #[test]
-fn eth_alone_cannot_open_a_short() {
+fn the_short_follows_what_the_swap_delivered_and_the_depositor_pays_for_it() {
     let mut env = Env::new();
     env.update_vault(Asset::Eth, spot_params());
     let carol = env.add_user("carol", 10 * SOL);
-    env.mint_asset(Asset::Eth, carol, 10 * ETH);
-    // 10 ETH and no USDC: Phoenix has no collateral for the short.
-    let r = env.deposit(Asset::Eth, "carol", 10 * ETH, 0);
-    assert!(r.is_err(), "a spot deposit needs USDC margin");
-    // 10 ETH short needs 10 ETH of USDC next to it at 1x.
-    env.mint_usdc(carol, 35_000 * USDC);
-    env.deposit(Asset::Eth, "carol", 10 * ETH, 35_000 * USDC)
-        .unwrap();
-    let v = env.print(Asset::Eth, "carol deposits 10 ETH + $35,000");
-    assert_eq!(v.position_lots, -10_000);
+    env.mint_usdc(carol, 70_000 * USDC);
+
+    // Jupiter fills 0.5% under the mark: $17,500 buys 4.975 ETH, and the short is 4.975 ETH.
+    let route = env.mock_route(Asset::Eth, Sell::Usdc, 17_500 * USDC, 4_975 * ETH / 1_000);
+    let ix = env.deposit_ix_with(Asset::Eth, carol, 35_000 * USDC, 0, route);
+    let meta = env
+        .send("carol", vec![ix], "deposit")
+        .unwrap_or_else(|l| panic!("{}", l.join("\n")));
+    let e = &events::<Deposited>(&meta)[0];
+    let v = env.print(Asset::Eth, "carol deposits $35,000, filled 0.5% under");
+    assert_eq!(v.asset_units, 4_975 * ETH / 1_000);
+    assert_eq!(v.position_lots, -4_975, "hedges what arrived");
+    assert!(
+        usd(e.value_usd) < 34_915.0,
+        "the $87.50 the fill cost is carol's: {}",
+        usd(e.value_usd)
+    );
+
+    // 2% under the mark is past the vault's 1% band.
+    let route = env.mock_route(Asset::Eth, Sell::Usdc, 17_500 * USDC, 49 * ETH / 10);
+    let ix = env.deposit_ix_with(Asset::Eth, carol, 35_000 * USDC, 0, route);
+    assert!(failed_with(
+        env.send("carol", vec![ix], "deposit"),
+        "SwapPriceTooLow"
+    ));
 }
 
 #[test]
@@ -75,11 +88,8 @@ fn eth_rallies_the_keeper_moves_value_to_margin_and_carol_exits_whole() {
     env.update_vault(Asset::Eth, spot_params());
     env.setup_keeper_accounts();
     let carol = env.add_user("carol", 10 * SOL);
-    env.mint_asset(Asset::Eth, carol, 5 * ETH);
-    env.mint_usdc(carol, 17_500 * USDC);
-    env.deposit(Asset::Eth, "carol", 5 * ETH, 17_500 * USDC)
-        .unwrap();
-    let start = env.print(Asset::Eth, "carol deposits 5 ETH + $17,500");
+    env.deposit(Asset::Eth, "carol", 35_000 * USDC).unwrap();
+    let start = env.print(Asset::Eth, "carol deposits $35,000");
 
     env.move_price(Asset::Eth, 4_550.0);
     let up = env.print(Asset::Eth, "ETH +30% to $4,550");
@@ -114,17 +124,18 @@ fn eth_rallies_the_keeper_moves_value_to_margin_and_carol_exits_whole() {
         .unwrap_or_else(|l| panic!("{}", l.join("\n")));
     let out = &events::<Withdrawn>(&meta)[0];
     let end = env.print(Asset::Eth, "carol withdraws everything");
-    let eth = env.asset_balance(Asset::Eth, carol) as f64 / ETH as f64;
-    let usdc = usd(env.usdc(carol));
     eprintln!(
-        "carol: put in $35,000, took out {eth:.4} ETH + ${usdc:.2} = ${:.2} ({} compute units)",
-        eth * 4_550.0 + usdc,
+        "carol: put in $35,000, took out ${:.2} USDC ({:.4} ETH sold, {} compute units)",
+        usd(out.usdc_out),
+        out.asset_sold as f64 / ETH as f64,
         meta.compute_units_consumed
     );
+    assert_eq!(env.usdc(carol), out.usdc_out, "paid in USDC");
+    assert_eq!(env.asset_balance(Asset::Eth, carol), 0, "and no ETH");
     assert!(
-        usd(out.payout_usd) > 34_900.0,
+        usd(out.usdc_out) > 34_900.0,
         "payout {}",
-        usd(out.payout_usd)
+        usd(out.usdc_out)
     );
     assert_eq!(end.supply, 0);
     assert_eq!(end.position_lots, 0);
@@ -135,20 +146,15 @@ fn btc_vault_two_users_and_a_drop() {
     let mut env = Env::new();
     env.update_vault(Asset::Btc, spot_params());
     let dan = env.add_user("dan", 10 * SOL);
-    let erin = env.add_user("erin", 10 * SOL);
-    env.mint_asset(Asset::Btc, dan, BTC / 2);
-    env.mint_usdc(dan, 50_000 * USDC);
-    env.deposit(Asset::Btc, "dan", BTC / 2, 50_000 * USDC)
+    env.add_user("erin", 10 * SOL);
+    env.deposit(Asset::Btc, "dan", 100_000 * USDC)
         .unwrap_or_else(|l| panic!("{}", l.join("\n")));
-    env.print(Asset::Btc, "dan deposits 0.5 BTC + $50,000");
+    env.print(Asset::Btc, "dan deposits $100,000");
 
     env.move_price(Asset::Btc, 90_000.0);
     let down = env.print(Asset::Btc, "BTC -10% to $90,000");
-    env.mint_asset(Asset::Btc, erin, BTC / 10);
-    env.mint_usdc(erin, 9_000 * USDC);
-    env.deposit(Asset::Btc, "erin", BTC / 10, 9_000 * USDC)
-        .unwrap();
-    let both = env.print(Asset::Btc, "erin deposits 0.1 BTC + $9,000");
+    env.deposit(Asset::Btc, "erin", 18_000 * USDC).unwrap();
+    let both = env.print(Asset::Btc, "erin deposits $18,000");
     assert!((both.share_price() - down.share_price()).abs() < 1e-5);
     assert_eq!(both.position_lots, -6_000, "0.6 BTC held, 0.6 BTC short");
 
@@ -160,14 +166,13 @@ fn btc_vault_two_users_and_a_drop() {
     let out = &events::<Withdrawn>(&meta)[0];
     let after = env.print(Asset::Btc, "dan withdraws half");
     eprintln!(
-        "dan's half: {:.4} BTC + ${:.2} = ${:.2}",
-        out.asset_out as f64 / BTC as f64,
+        "dan's half: {:.4} BTC sold, ${:.2} USDC",
+        out.asset_sold as f64 / BTC as f64,
         usd(out.usdc_out),
-        usd(out.payout_usd)
     );
-    // Every share holds the same mix of BTC and USDC, so dan takes his shares' part of each.
-    assert_eq!(out.asset_out, (6 * BTC / 10) * half / supply);
-    assert!(usd(out.payout_usd) > 49_900.0 && usd(out.payout_usd) < 50_000.0);
+    // Every share holds the same mix of BTC and USDC, so dan sells his shares' part of the BTC.
+    assert_eq!(out.asset_sold, (6 * BTC / 10) * half / supply);
+    assert!(usd(out.usdc_out) > 49_850.0 && usd(out.usdc_out) < 50_000.0);
     assert!(after.share_price() >= both.share_price() - 1e-6);
     assert_eq!(
         after.position_lots,
@@ -184,11 +189,8 @@ fn a_phoenix_deposit_cooldown_would_delay_usdc_withdrawals() {
     env.update_vault(Asset::Eth, spot_params());
     set_deposit_cooldown(&mut env.ctx, 150);
     let carol = env.add_user("carol", 10 * SOL);
-    env.add_user("alice", 1_000 * SOL);
-    env.mint_asset(Asset::Eth, carol, 5 * ETH);
-    env.mint_usdc(carol, 17_500 * USDC);
-    env.deposit(Asset::Eth, "carol", 5 * ETH, 17_500 * USDC)
-        .unwrap();
+    env.add_user("alice", 10 * SOL);
+    env.deposit(Asset::Eth, "carol", 35_000 * USDC).unwrap();
     let half = env.shares(Asset::Eth, carol) / 2;
     assert!(failed_with(
         env.withdraw(Asset::Eth, "carol", half),
@@ -198,34 +200,25 @@ fn a_phoenix_deposit_cooldown_would_delay_usdc_withdrawals() {
     env.withdraw(Asset::Eth, "carol", half)
         .unwrap_or_else(|l| panic!("{}", l.join("\n")));
 
-    // Native SOL withdrawals are not held back: the SOL vault pays out at once.
-    env.deposit(Asset::Sol, "alice", 10 * SOL, 0).unwrap();
+    // The SOL vault posts no USDC (all of a deposit buys SOL) and pays out SOL sold through
+    // Jupiter, so nothing holds it back.
+    env.deposit(Asset::Sol, "alice", 1_500 * USDC).unwrap();
     let shares = env.shares(Asset::Sol, env.ctx.signer_pubkey("alice"));
     env.withdraw(Asset::Sol, "alice", shares / 2)
         .unwrap_or_else(|l| panic!("{}", l.join("\n")));
 }
 
 #[test]
-fn usdc_alone_needs_a_swap_and_the_keeper_reinvests_within_its_band() {
+fn the_keeper_reinvests_within_its_band_and_frank_exits_in_usdc() {
     let mut env = Env::new();
     env.update_vault(Asset::Eth, spot_params());
     env.setup_keeper_accounts();
     let frank = env.add_user("frank", 10 * SOL);
-    env.mint_usdc(frank, 35_000 * USDC);
-
-    // USDC alone without a swap would buy the vault's hedged ETH at Phoenix's mark, not at the
-    // spot price: refused. (A single-asset deposit swaps through Jupiter instead.)
-    assert!(failed_with(
-        env.deposit(Asset::Eth, "frank", 0, 35_000 * USDC),
-        "DepositOffMix"
-    ));
-    env.mint_asset(Asset::Eth, frank, 5 * ETH);
-    env.mint_usdc(frank, 1_000 * USDC);
     let meta = env
-        .deposit(Asset::Eth, "frank", 5 * ETH, 17_500 * USDC)
+        .deposit(Asset::Eth, "frank", 35_000 * USDC)
         .unwrap_or_else(|l| panic!("{}", l.join("\n")));
     let e = &events::<Deposited>(&meta)[0];
-    env.print(Asset::Eth, "frank deposits 5 ETH + $17,500");
+    env.print(Asset::Eth, "frank deposits $35,000");
     eprintln!("frank: {:.2} shares", usd(e.shares));
 
     // The keeper takes 0.1 ETH off the vault for $350 of margin, within its band. Selling the
@@ -251,10 +244,9 @@ fn usdc_alone_needs_a_swap_and_the_keeper_reinvests_within_its_band() {
     let out = &events::<Withdrawn>(&meta)[0];
     env.print(Asset::Eth, "frank withdraws everything");
     eprintln!(
-        "frank: put in $35,000, took out {:.4} ETH + ${:.2} USDC = ${:.2} at $4,000",
-        out.asset_out as f64 / ETH as f64,
+        "frank: put in $35,000, took out ${:.2} USDC at $4,000 ({:.4} ETH sold)",
         usd(out.usdc_out),
-        usd(out.payout_usd)
+        out.asset_sold as f64 / ETH as f64,
     );
-    assert!(usd(out.payout_usd) > 34_900.0);
+    assert!(usd(out.usdc_out) > 34_900.0);
 }

@@ -7,6 +7,10 @@
 //! multiplier), so `use_jupiter` can load real Jupiter routes over real Orca and Raydium pools
 //! next to them. Phoenix's fixture lists only BTC, ETH and SOL; the stock markets are added
 //! with mainnet's lot and tick sizes.
+//!
+//! Every deposit and withdrawal swaps through Jupiter's address. Until `use_jupiter` loads the
+//! real program there, a mock (`tests/mock_jupiter`) sits at it and swaps at Phoenix's mark,
+//! so tests can move prices freely; the real routes only work at the snapshot's prices.
 
 use anchor_lang::prelude::{pubkey, Clock, Pubkey};
 use anchor_lang::solana_program::instruction::{AccountMeta, Instruction};
@@ -40,7 +44,7 @@ use vanna_phoenix_vault::phoenix::{
     PHOENIX_LOG_AUTHORITY, PHOENIX_PROGRAM_ID,
 };
 use vanna_phoenix_vault::state::{authority_address, BasisVault, VaultKind};
-use vanna_phoenix_vault::swap::{plan_deposit_swap, Receive, Sell, SwapRoute};
+use vanna_phoenix_vault::swap::{deposit_swap_amount, Sell, SwapRoute};
 use vanna_phoenix_vault::{accounts, instruction};
 
 pub const SOL: u64 = 1_000_000_000;
@@ -152,8 +156,6 @@ pub struct Vault {
 pub struct VaultView {
     /// Phoenix's mark: per share for a stock.
     pub mark_usd: f64,
-    /// Market units (shares) per asset token: above 1 for a stock that reinvested dividends.
-    pub multiplier: f64,
     pub position_lots: i64,
     pub asset_units: u64,
     pub collateral_usd: f64,
@@ -217,7 +219,7 @@ pub fn default_params() -> VaultParams {
     }
 }
 
-/// The SOL vault's SOL is its own margin: single-asset deposits put everything into SOL.
+/// The SOL vault's SOL is its own margin: all of a deposit buys SOL.
 pub fn sol_params() -> VaultParams {
     VaultParams {
         target_margin_bps: 0,
@@ -296,10 +298,17 @@ impl Env {
         use_mainnet_usdc(&mut fixture);
         add_stock_market(&mut fixture, "TSLA");
         add_stock_market(&mut fixture, "META");
+        let mock_jupiter = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../target/deploy/mock_jupiter.so"
+        );
         let mut ctx = SdkLocalnetContext::new_with_programs(
             fixture,
             paths,
-            [SdkLocalnetProgram::new(vanna_phoenix_vault::ID, so)],
+            [
+                SdkLocalnetProgram::new(vanna_phoenix_vault::ID, so),
+                SdkLocalnetProgram::new(JUPITER, mock_jupiter),
+            ],
         );
         // Real time, from when the Jupiter routes were snapshotted: Orca's pools reject a clock
         // older than their last update.
@@ -376,7 +385,29 @@ impl Env {
         };
 
         set_upgrade_authority(&mut env.ctx, admin);
+        env.fund_mock_reserve();
         env
+    }
+
+    /// The mock Jupiter's reserve: plenty of every token it pays out.
+    fn fund_mock_reserve(&mut self) {
+        let reserve = mock_reserve();
+        for mint in [USDC_MINT, NATIVE_MINT, ETH_MINT, BTC_MINT, TSLA_MINT, META_MINT] {
+            self.create_ata(ADMIN, reserve, mint);
+        }
+        self.mint_usdc(reserve, 1_000_000_000 * USDC);
+        for asset in [Asset::Eth, Asset::Btc, Asset::Tsla, Asset::Meta] {
+            let units = 10u64.pow(self.vault(asset).decimals as u32);
+            self.mint_asset(asset, reserve, 1_000_000 * units);
+        }
+        let wsol = Self::ata(&reserve, &NATIVE_MINT);
+        self.ctx.svm.airdrop(&wsol, 100_000 * SOL).unwrap();
+        let sync = Instruction {
+            program_id: TOKEN_PROGRAM,
+            accounts: vec![AccountMeta::new(wsol, false)],
+            data: vec![17],
+        };
+        self.ctx.send_instructions(vec![sync], ADMIN, "sync reserve wSOL");
     }
 
     /// `initialize`, signed by `signer`: the admin, the keeper and Jupiter as the swap venue.
@@ -619,63 +650,82 @@ impl Env {
         }
     }
 
-    /// Deposits a single asset (or any mix): the vault plans the swap to its target mix and
-    /// the client asks Jupiter for a route of exactly that amount, as the app does.
-    pub fn deposit_single(
-        &mut self,
-        asset: Asset,
-        user_seed: &str,
-        asset_amount: u64,
-        usdc_amount: u64,
-    ) -> Result<TransactionMetadata, Vec<String>> {
-        let user = self.ctx.signer_pubkey(user_seed);
-        let price = self.mark_price(asset);
-        let target = self.basis_vault(asset).target_margin_bps;
-        let decimals = self.vault(asset).decimals;
-        let plan = plan_deposit_swap(&price, decimals, target, asset_amount, usdc_amount).unwrap();
-        let route = plan.map(|(sell, amount)| self.jupiter_route_for(asset, sell, amount).route);
-        let ix = self.deposit_ix_with(asset, user, asset_amount, usdc_amount, 0, route);
-        self.send(user_seed, vec![ix], "deposit")
+    /// A route selling `amount` of `sell` at Phoenix's mark, as the app asks Jupiter for one:
+    /// the snapshotted Jupiter route once `use_jupiter` has loaded it, the mock's otherwise.
+    pub fn route_for(&mut self, asset: Asset, sell: Sell, amount: u64) -> Route {
+        if self.jupiter.is_some() {
+            return self.jupiter_route_for(asset, sell, amount).route;
+        }
+        let price = self.mark_price(asset).value as u128;
+        let units = 10u128.pow(self.vault(asset).decimals as u32);
+        let out = match sell {
+            Sell::Usdc => amount as u128 * units / price,
+            Sell::Asset => amount as u128 * price / units,
+        };
+        self.mock_route(asset, sell, amount, out as u64)
     }
 
-    /// Withdraws into a single asset. The client estimates what the vault will sell and
-    /// builds the route for a little less; the vault pays the rest as it is.
-    pub fn withdraw_single(
-        &mut self,
-        asset: Asset,
-        user_seed: &str,
-        shares: u64,
-        receive: Receive,
-    ) -> Result<TransactionMetadata, Vec<String>> {
-        let user = self.ctx.signer_pubkey(user_seed);
+    /// A mock Jupiter route for `asset`'s vault: it takes `in_amount` of `sell` from the vault
+    /// and pays `quoted_out` of the other side, the quote scaled with the amount the vault
+    /// resizes it to.
+    pub fn mock_route(&self, asset: Asset, sell: Sell, in_amount: u64, quoted_out: u64) -> Route {
+        let v = self.vault(asset);
+        let reserve = mock_reserve();
+        let (asset_account, asset_mint, asset_program) = match v.vault_asset {
+            Some(account) => (account, v.asset_mint, v.token_program),
+            None => (
+                get_associated_token_address(&v.authority, &NATIVE_MINT),
+                NATIVE_MINT,
+                TOKEN_PROGRAM,
+            ),
+        };
+        let usdc = (v.vault_usdc, self.usdc_mint, TOKEN_PROGRAM);
+        let asset_side = (asset_account, asset_mint, asset_program);
+        let (sold, bought) = match sell {
+            Sell::Usdc => (usdc, asset_side),
+            Sell::Asset => (asset_side, usdc),
+        };
+        let metas = vec![
+            AccountMeta::new_readonly(v.authority, false),
+            AccountMeta::new(sold.0, false),
+            AccountMeta::new(bought.0, false),
+            AccountMeta::new(Self::ata(&reserve, &sold.1), false),
+            AccountMeta::new(Self::ata(&reserve, &bought.1), false),
+            AccountMeta::new_readonly(reserve, false),
+            AccountMeta::new_readonly(sold.1, false),
+            AccountMeta::new_readonly(bought.1, false),
+            AccountMeta::new_readonly(sold.2, false),
+            AccountMeta::new_readonly(bought.2, false),
+        ];
+        // Jupiter's `shared_accounts_route`, cut to the fields the vault and the mock read.
+        let mut data = vec![193, 32, 155, 51, 65, 214, 156, 129];
+        data.extend_from_slice(&in_amount.to_le_bytes());
+        data.extend_from_slice(&quoted_out.to_le_bytes());
+        data.extend_from_slice(&50u16.to_le_bytes());
+        data.push(0);
+        Route {
+            args: SwapRoute {
+                accounts: metas.len() as u8,
+                data,
+            },
+            metas,
+        }
+    }
+
+    /// The asset a withdrawal of `shares` will sell, about: a spot vault's part of its tokens;
+    /// for the SOL vault, the payout less the trade's cost in SOL. The vault resizes the route
+    /// to the exact amount.
+    pub fn withdraw_estimate(&mut self, asset: Asset, shares: u64) -> u64 {
         let v = self.vault(asset).clone();
         let view = self.view(asset);
         let part = shares as f64 / view.supply as f64;
-        let units = 10f64.powi(v.decimals as i32);
-        // The leaver pays to close their part of the short: about 0.1% of it.
-        let payout = view.nav_usd * part * 0.999;
-        let (sell, estimate) = match (v.kind, receive) {
-            (VaultKind::Spot, Receive::Usdc) => (Sell::Asset, view.asset_units as f64 * part),
-            (VaultKind::Spot, Receive::Asset) => {
-                let asset_usd =
-                    view.asset_units as f64 * part / units * view.mark_usd * view.multiplier;
-                (Sell::Usdc, (payout - asset_usd) * USDC as f64)
+        match v.kind {
+            VaultKind::Spot => (view.asset_units as f64 * part) as u64,
+            VaultKind::NativeSol => {
+                let units = 10f64.powi(v.decimals as i32);
+                (view.nav_usd * part * 0.999 / view.mark_usd * units) as u64
             }
-            (VaultKind::NativeSol, Receive::Usdc) => (Sell::Asset, payout / view.mark_usd * units),
-            _ => panic!("no swap to estimate"),
-        };
-        // The asset part of a spot vault is known exactly; a USDC part or SOL depends on the
-        // trade's cost, so the route sells a little less than estimated.
-        let haircut = if v.kind == VaultKind::Spot && sell == Sell::Asset {
-            0.9995
-        } else {
-            0.996
-        };
-        let route = self
-            .jupiter_route_for(asset, sell, (estimate * haircut) as u64)
-            .route;
-        let ix = self.withdraw_ix_with(asset, user, shares, 0, 0, receive, Some(route));
-        self.send(user_seed, vec![ix], "withdraw")
+        }
     }
 
     pub fn vault(&self, asset: Asset) -> &Vault {
@@ -1280,39 +1330,39 @@ impl Env {
         }
     }
 
+    /// A deposit of `usdc_amount`, with the route the app builds for it: the part the vault's
+    /// mix buys the asset with (`deposit_swap_amount`), at Phoenix's mark.
     pub fn deposit_ix(
-        &self,
+        &mut self,
         asset: Asset,
         user: Pubkey,
-        asset_amount: u64,
         usdc_amount: u64,
         min_shares: u64,
     ) -> Instruction {
-        self.deposit_ix_with(asset, user, asset_amount, usdc_amount, min_shares, None)
+        let target = self.basis_vault(asset).target_margin_bps;
+        let planned = deposit_swap_amount(usdc_amount, target).unwrap().max(1);
+        let route = self.route_for(asset, Sell::Usdc, planned);
+        self.deposit_ix_with(asset, user, usdc_amount, min_shares, route)
     }
 
     pub fn deposit_ix_with(
         &self,
         asset: Asset,
         user: Pubkey,
-        asset_amount: u64,
         usdc_amount: u64,
         min_shares: u64,
-        route: Option<Route>,
+        route: Route,
     ) -> Instruction {
         let v = self.vault(asset);
         let spot = v.kind == VaultKind::Spot;
-        let swaps_sol = !spot && route.is_some();
         let ix = self.ix(
             accounts::Deposit {
                 user,
                 core: self.core(asset),
                 user_shares: get_associated_token_address(&user, &v.share_mint),
-                user_asset: spot.then(|| Self::ata(&user, &v.asset_mint)),
-                user_usdc: (usdc_amount > 0)
-                    .then(|| get_associated_token_address(&user, &self.usdc_mint)),
-                swap_program: route.is_some().then_some(JUPITER),
-                vault_wsol: swaps_sol
+                user_usdc: get_associated_token_address(&user, &self.usdc_mint),
+                swap_program: JUPITER,
+                vault_wsol: (!spot)
                     .then(|| get_associated_token_address(&v.authority, &NATIVE_MINT)),
                 token_program: TOKEN_PROGRAM,
                 associated_token_program: ATA_PROGRAM,
@@ -1321,59 +1371,49 @@ impl Env {
             instruction::Deposit {
                 gti: self.gti.len() as u8,
                 atb: self.atb.len() as u8,
-                asset_amount,
                 usdc_amount,
                 min_shares,
-                route: route.as_ref().map(|r| r.args.clone()),
+                route: route.args.clone(),
             },
         );
         let mut ix = self.with_index(ix);
-        if let Some(route) = route {
-            ix.accounts.extend(route.metas);
-        }
+        ix.accounts.extend(route.metas);
         ix
     }
 
+    /// Deposits `usdc_amount` of the user's USDC (minted to them first).
     pub fn deposit(
         &mut self,
         asset: Asset,
         user_seed: &str,
-        asset_amount: u64,
         usdc_amount: u64,
     ) -> Result<TransactionMetadata, Vec<String>> {
         let user = self.ctx.signer_pubkey(user_seed);
-        let ix = self.deposit_ix(asset, user, asset_amount, usdc_amount, 0);
+        self.mint_usdc(user, usdc_amount);
+        let ix = self.deposit_ix(asset, user, usdc_amount, 0);
         self.send(user_seed, vec![ix], "deposit")
     }
 
+    /// A withdrawal of `shares`, with a route for about the asset it will sell
+    /// (`withdraw_estimate`).
     pub fn withdraw_ix(
-        &self,
+        &mut self,
         asset: Asset,
         user: Pubkey,
         shares: u64,
-        min_asset_out: u64,
         min_usdc_out: u64,
     ) -> Instruction {
-        self.withdraw_ix_with(
-            asset,
-            user,
-            shares,
-            min_asset_out,
-            min_usdc_out,
-            Receive::Both,
-            None,
-        )
+        let estimate = self.withdraw_estimate(asset, shares);
+        let route = (estimate > 0).then(|| self.route_for(asset, Sell::Asset, estimate));
+        self.withdraw_ix_with(asset, user, shares, min_usdc_out, route)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn withdraw_ix_with(
         &self,
         asset: Asset,
         user: Pubkey,
         shares: u64,
-        min_asset_out: u64,
         min_usdc_out: u64,
-        receive: Receive,
         route: Option<Route>,
     ) -> Instruction {
         let v = self.vault(asset);
@@ -1384,8 +1424,7 @@ impl Env {
                 user,
                 core: self.core(asset),
                 user_shares: get_associated_token_address(&user, &v.share_mint),
-                user_asset: spot.then(|| Self::ata(&user, &v.asset_mint)),
-                user_usdc: Some(get_associated_token_address(&user, &self.usdc_mint)),
+                user_usdc: get_associated_token_address(&user, &self.usdc_mint),
                 swap_program: route.is_some().then_some(JUPITER),
                 vault_wsol: swaps_sol
                     .then(|| get_associated_token_address(&v.authority, &NATIVE_MINT)),
@@ -1397,9 +1436,7 @@ impl Env {
                 gti: self.gti.len() as u8,
                 atb: self.atb.len() as u8,
                 shares,
-                min_asset_out,
                 min_usdc_out,
-                receive,
                 route: route.as_ref().map(|r| r.args.clone()),
             },
         );
@@ -1410,6 +1447,8 @@ impl Env {
         ix
     }
 
+    /// Withdraws `shares` into USDC. When Phoenix lets no asset leave (the SOL vault's SOL
+    /// held for its USDC debt), the app sends the withdrawal again without a route.
     pub fn withdraw(
         &mut self,
         asset: Asset,
@@ -1417,8 +1456,14 @@ impl Env {
         shares: u64,
     ) -> Result<TransactionMetadata, Vec<String>> {
         let user = self.ctx.signer_pubkey(user_seed);
-        let ix = self.withdraw_ix(asset, user, shares, 0, 0);
-        self.send(user_seed, vec![ix], "withdraw")
+        let ix = self.withdraw_ix(asset, user, shares, 0);
+        match self.send(user_seed, vec![ix], "withdraw") {
+            Err(logs) if logs.iter().any(|l| l.contains("SwapNotNeeded")) => {
+                let ix = self.withdraw_ix_with(asset, user, shares, 0, None);
+                self.send(user_seed, vec![ix], "withdraw")
+            }
+            result => result,
+        }
     }
 
     pub fn rebalance(
@@ -1534,7 +1579,6 @@ impl Env {
         let supply_data = self.ctx.account_data(&v.share_mint);
         VaultView {
             mark_usd,
-            multiplier,
             position_lots: a.base_lots,
             asset_units,
             collateral_usd: usd(m.collateral_quote_lots),
@@ -1624,6 +1668,11 @@ fn vault_keys(
 pub struct Route {
     pub args: SwapRoute,
     pub metas: Vec<AccountMeta>,
+}
+
+/// The mock Jupiter's reserve authority: it pays the swaps' output.
+pub fn mock_reserve() -> Pubkey {
+    Pubkey::find_program_address(&[b"reserve"], &JUPITER).0
 }
 
 /// The Jupiter routes and mainnet accounts written by `scripts/jupiter_fork.py`.

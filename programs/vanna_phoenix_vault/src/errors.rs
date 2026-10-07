@@ -42,8 +42,8 @@ pub enum VaultError {
     RebalanceLimitReached,
     #[msg("The token's multiplier is changing: deposits wait until it has settled")]
     MultiplierChanging,
-    #[msg("A deposit without a swap must match the vault's asset and USDC mix")]
-    DepositOffMix,
+    #[msg("The swap route is not a Jupiter route the vault can size")]
+    UnsupportedRoute,
     #[msg("The vault's margin would fall below its target")]
     MarginTooThin,
     #[msg("Fewer shares than the minimum")]

@@ -9,9 +9,9 @@ use vanna_phoenix_vault::events::Rebalanced;
 fn funding_raises_the_share_price_and_the_keeper_reinvests_it() {
     let mut env = Env::new();
     env.setup_keeper_accounts();
-    env.add_user("alice", 1_000 * SOL);
-    env.deposit(Asset::Sol, "alice", 100 * SOL, 0).unwrap();
-    env.print(Asset::Sol, "alice deposits 100 SOL");
+    env.add_user("alice", 10 * SOL);
+    env.deposit(Asset::Sol, "alice", 15_000 * USDC).unwrap();
+    env.print(Asset::Sol, "alice deposits $15,000 (100 SOL)");
 
     // Phoenix never lets SOL collateral back a USDC withdrawal, so the SOL vault keeps a USDC
     // buffer above the short's initial margin. The keeper sets it up by buying 8 SOL.
@@ -92,12 +92,9 @@ fn spot_vault_funding_is_reinvested_into_eth() {
         },
     );
     env.setup_keeper_accounts();
-    let carol = env.add_user("carol", 10 * SOL);
-    env.mint_asset(Asset::Eth, carol, 10 * ETH);
-    env.mint_usdc(carol, 35_000 * USDC);
-    env.deposit(Asset::Eth, "carol", 10 * ETH, 35_000 * USDC)
-        .unwrap();
-    let start = env.print(Asset::Eth, "carol deposits 10 ETH + $35,000");
+    env.add_user("carol", 10 * SOL);
+    env.deposit(Asset::Eth, "carol", 70_000 * USDC).unwrap();
+    let start = env.print(Asset::Eth, "carol deposits $70,000 (10 ETH + margin)");
 
     env.set_perp_premium(Asset::Eth, 3_535.0, 3_500.0);
     env.warp_hours(72);
@@ -124,9 +121,9 @@ fn spot_vault_funding_is_reinvested_into_eth() {
 #[test]
 fn shorts_pay_when_the_perp_trades_below_spot() {
     let mut env = Env::new();
-    env.add_user("alice", 1_000 * SOL);
-    env.deposit(Asset::Sol, "alice", 100 * SOL, 0).unwrap();
-    let start = env.print(Asset::Sol, "alice deposits 100 SOL");
+    env.add_user("alice", 10 * SOL);
+    env.deposit(Asset::Sol, "alice", 15_000 * USDC).unwrap();
+    let start = env.print(Asset::Sol, "alice deposits $15,000 (100 SOL)");
     env.set_perp_premium(Asset::Sol, 148.5, 150.0);
     env.warp_hours(24);
     let paid = env.print(Asset::Sol, "a day of negative funding");
@@ -141,8 +138,8 @@ fn shorts_pay_when_the_perp_trades_below_spot() {
 fn only_the_keeper_rebalances_and_only_near_the_mark() {
     let mut env = Env::new();
     env.setup_keeper_accounts();
-    env.add_user("alice", 1_000 * SOL);
-    env.deposit(Asset::Sol, "alice", 100 * SOL, 0).unwrap();
+    env.add_user("alice", 10 * SOL);
+    env.deposit(Asset::Sol, "alice", 15_000 * USDC).unwrap();
     env.mint_usdc(env.keeper, 10_000 * USDC);
 
     assert!(failed_with(

@@ -1,15 +1,15 @@
-//! Single-asset deposits and withdrawals through real Jupiter. The user brings only USDC or
-//! only the asset; the vault plans the swap to its target mix, runs a Jupiter v6 route over a
-//! real Orca Whirlpool pool (snapshotted from mainnet by `scripts/jupiter_fork.py`) and books
-//! what Jupiter actually delivered, never the quote: the asset it holds, the short, the margin
-//! and the shares. Withdrawals can pay out in one asset the same way.
+//! Deposits and withdrawals through real Jupiter. The user brings USDC and gets USDC back; the
+//! vault runs a Jupiter v6 route over a real Orca Whirlpool pool (snapshotted from mainnet by
+//! `scripts/jupiter_fork.py`), resized to the exact amount it sells, and books what Jupiter
+//! actually delivered, never the quote: the asset it holds, the short, the margin and the
+//! shares.
 
 use crate::env::*;
 use anchor_spl::associated_token::get_associated_token_address;
 use vanna_phoenix_vault::constants::NATIVE_MINT;
 use vanna_phoenix_vault::events::{Deposited, Swapped, Withdrawn};
 use vanna_phoenix_vault::instructions::VaultParams;
-use vanna_phoenix_vault::swap::{Receive, Sell};
+use vanna_phoenix_vault::swap::Sell;
 
 fn spot_params() -> VaultParams {
     VaultParams {
@@ -50,15 +50,14 @@ fn report(label: &str, quoted: u64, swap: &Swapped, decimals: u8, cu: u64) {
 }
 
 #[test]
-fn eth_vault_usdc_only_buys_half_in_eth_and_shorts_what_arrived() {
+fn eth_vault_buys_half_in_eth_and_shorts_what_arrived() {
     let mut env = jupiter_env();
     let frank = env.add_user("frank", 10 * SOL);
-    env.mint_usdc(frank, 7_000 * USDC);
     let quoted = env
         .jupiter_route_for(Asset::Eth, Sell::Usdc, 3_500 * USDC)
         .quoted_out;
 
-    let meta = expect(env.deposit_single(Asset::Eth, "frank", 0, 7_000 * USDC));
+    let meta = expect(env.deposit(Asset::Eth, "frank", 7_000 * USDC));
     let swap = &events::<Swapped>(&meta)[0];
     let dep = &events::<Deposited>(&meta)[0];
     report(
@@ -68,7 +67,7 @@ fn eth_vault_usdc_only_buys_half_in_eth_and_shorts_what_arrived() {
         SPOT_DECIMALS,
         meta.compute_units_consumed,
     );
-    let v = env.print(Asset::Eth, "frank deposits $7,000 USDC");
+    let v = env.print(Asset::Eth, "frank deposits $7,000");
 
     assert!(swap.sold_usdc);
     assert_eq!(swap.spent, 3_500 * USDC, "half the USDC buys ETH");
@@ -76,6 +75,7 @@ fn eth_vault_usdc_only_buys_half_in_eth_and_shorts_what_arrived() {
         swap.received * 1_000 >= quoted * 995,
         "Jupiter delivered its quote"
     );
+    assert_eq!(dep.asset_bought, swap.received);
     assert_eq!(
         v.asset_units, swap.received,
         "the vault holds exactly what Jupiter delivered"
@@ -102,47 +102,15 @@ fn eth_vault_usdc_only_buys_half_in_eth_and_shorts_what_arrived() {
 }
 
 #[test]
-fn eth_vault_eth_only_sells_half_for_margin() {
+fn btc_vault_two_usdc_deposits_at_one_share_price() {
     let mut env = jupiter_env();
-    let carol = env.add_user("carol", 10 * SOL);
-    env.mint_asset(Asset::Eth, carol, 2 * ETH);
-    let quoted = env
-        .jupiter_route_for(Asset::Eth, Sell::Asset, ETH)
-        .quoted_out;
-
-    let meta = expect(env.deposit_single(Asset::Eth, "carol", 2 * ETH, 0));
-    let swap = &events::<Swapped>(&meta)[0];
-    report(
-        "ETH -> USDC",
-        quoted,
-        swap,
-        SPOT_DECIMALS,
-        meta.compute_units_consumed,
-    );
-    let v = env.print(Asset::Eth, "carol deposits 2 ETH");
-
-    assert!(!swap.sold_usdc);
-    assert_eq!(swap.spent, ETH, "half the ETH is sold for margin");
-    assert_eq!(v.asset_units, ETH, "1 ETH stays in the vault");
-    assert_eq!(v.position_lots, -1_000, "and the vault is short 1 ETH");
-    assert!(
-        (v.collateral_usd - usd(swap.received)).abs() < 2.0,
-        "the margin is what Jupiter delivered"
-    );
-}
-
-#[test]
-fn btc_vault_takes_usdc_or_btc() {
-    let mut env = jupiter_env();
-    let dan = env.add_user("dan", 10 * SOL);
-    let erin = env.add_user("erin", 10 * SOL);
-    env.mint_usdc(dan, 20_000 * USDC);
-    env.mint_asset(Asset::Btc, erin, BTC / 5);
+    env.add_user("dan", 10 * SOL);
+    env.add_user("erin", 10 * SOL);
 
     let quoted = env
         .jupiter_route_for(Asset::Btc, Sell::Usdc, 10_000 * USDC)
         .quoted_out;
-    let meta = expect(env.deposit_single(Asset::Btc, "dan", 0, 20_000 * USDC));
+    let meta = expect(env.deposit(Asset::Btc, "dan", 20_000 * USDC));
     let swap = &events::<Swapped>(&meta)[0];
     report(
         "USDC -> cbBTC",
@@ -151,22 +119,11 @@ fn btc_vault_takes_usdc_or_btc() {
         SPOT_DECIMALS,
         meta.compute_units_consumed,
     );
-    let one = env.print(Asset::Btc, "dan deposits $20,000 USDC");
+    let one = env.print(Asset::Btc, "dan deposits $20,000");
     assert_eq!(one.asset_units, swap.received);
 
-    let quoted = env
-        .jupiter_route_for(Asset::Btc, Sell::Asset, BTC / 10)
-        .quoted_out;
-    let meta = expect(env.deposit_single(Asset::Btc, "erin", BTC / 5, 0));
-    let swap = &events::<Swapped>(&meta)[0];
-    report(
-        "cbBTC -> USDC",
-        quoted,
-        swap,
-        SPOT_DECIMALS,
-        meta.compute_units_consumed,
-    );
-    let both = env.print(Asset::Btc, "erin deposits 0.2 BTC");
+    expect(env.deposit(Asset::Btc, "erin", 10_000 * USDC));
+    let both = env.print(Asset::Btc, "erin deposits $10,000");
     assert!((both.share_price() - one.share_price()).abs() < 1e-4);
     assert_eq!(
         both.position_lots,
@@ -178,19 +135,18 @@ fn btc_vault_takes_usdc_or_btc() {
 }
 
 #[test]
-fn sol_vault_usdc_only_buys_sol_and_shorts_all_of_it() {
+fn sol_vault_buys_sol_with_all_of_it_and_shorts_all_of_it() {
     let mut env = jupiter_env();
     let gina = env.add_user("gina", 10 * SOL);
-    env.mint_usdc(gina, 1_000 * USDC);
     let sol_before = env.asset_balance(Asset::Sol, gina);
     let quoted = env
         .jupiter_route_for(Asset::Sol, Sell::Usdc, 1_000 * USDC)
         .quoted_out;
 
-    let meta = expect(env.deposit_single(Asset::Sol, "gina", 0, 1_000 * USDC));
+    let meta = expect(env.deposit(Asset::Sol, "gina", 1_000 * USDC));
     let swap = &events::<Swapped>(&meta)[0];
     report("USDC -> SOL", quoted, swap, 9, meta.compute_units_consumed);
-    let v = env.print(Asset::Sol, "gina deposits $1,000 USDC");
+    let v = env.print(Asset::Sol, "gina deposits $1,000");
 
     assert_eq!(
         swap.spent,
@@ -225,111 +181,86 @@ fn sol_vault_usdc_only_buys_sol_and_shorts_all_of_it() {
     let rent = |len| env.ctx.svm.minimum_balance_for_rent_exemption(len);
     let paid = sol_before - env.asset_balance(Asset::Sol, gina);
     assert!(paid < meta.fee + rent(165) + rent(165) / 2);
-
-    // SOL alone needs no swap.
-    let before = v.position_lots;
-    expect(env.deposit_single(Asset::Sol, "gina", 2 * SOL, 0));
-    let more = env.print(Asset::Sol, "gina deposits 2 SOL");
-    assert_eq!(more.position_lots, before - 200);
 }
 
 #[test]
-fn withdraw_in_usdc_only_or_eth_only() {
+fn eth_vault_pays_out_in_usdc_and_sells_exactly_the_leavers_eth() {
     let mut env = jupiter_env();
     let carol = env.add_user("carol", 10 * SOL);
-    env.mint_asset(Asset::Eth, carol, 2 * ETH);
-    expect(env.deposit_single(Asset::Eth, "carol", 2 * ETH, 0));
-    let start = env.print(Asset::Eth, "carol deposits 2 ETH");
+    expect(env.deposit(Asset::Eth, "carol", 7_000 * USDC));
+    let start = env.print(Asset::Eth, "carol deposits $7,000");
     let half = env.shares(Asset::Eth, carol) / 2;
 
-    let meta = expect(env.withdraw_single(Asset::Eth, "carol", half, Receive::Usdc));
+    let meta = expect(env.withdraw(Asset::Eth, "carol", half));
     let swap = &events::<Swapped>(&meta)[0];
     let out = &events::<Withdrawn>(&meta)[0];
-    env.print(Asset::Eth, "carol takes half in USDC");
+    env.print(Asset::Eth, "carol withdraws half");
     eprintln!(
-        "USDC out: ${:.2} (Jupiter sold {:.6} ETH) + {:.6} ETH the route left unsold",
+        "USDC out: ${:.2} (Jupiter sold {:.8} ETH)",
         usd(out.usdc_out),
         swap.spent as f64 / ETH as f64,
-        out.asset_out as f64 / ETH as f64
     );
+    assert_eq!(swap.spent, out.asset_sold, "the route sold all of it");
     assert!(usd(out.usdc_out) > start.nav_usd / 2.0 * 0.98);
-    assert!(
-        out.asset_out < ETH / 500,
-        "only what the route left unsold comes as ETH"
-    );
 
-    let usdc_before = env.usdc(carol);
     let rest = env.shares(Asset::Eth, carol);
-    let meta = expect(env.withdraw_single(Asset::Eth, "carol", rest, Receive::Asset));
+    let meta = expect(env.withdraw(Asset::Eth, "carol", rest));
     let swap = &events::<Swapped>(&meta)[0];
     let out = &events::<Withdrawn>(&meta)[0];
-    let end = env.print(Asset::Eth, "carol takes the rest in ETH");
-    eprintln!(
-        "ETH out: {:.6} ETH (Jupiter bought {:.6} for ${:.2}) + ${:.2} USDC left over",
-        out.asset_out as f64 / ETH as f64,
-        swap.received as f64 / ETH as f64,
-        usd(swap.spent),
-        usd(env.usdc(carol) - usdc_before)
-    );
-    assert!(out.asset_out > 98 * ETH / 100, "about 1 ETH");
-    assert!(
-        usd(out.usdc_out) < 10.0,
-        "only what the route left unsold comes as USDC"
-    );
+    let end = env.print(Asset::Eth, "carol withdraws the rest");
+    assert_eq!(swap.spent, out.asset_sold);
     assert_eq!(end.supply, 0);
     assert_eq!(end.position_lots, 0);
-    let eth = env.asset_balance(Asset::Eth, carol) as f64 / ETH as f64;
-    let held = usd(env.usdc(carol)) + eth * end.mark_usd;
-    eprintln!(
-        "carol: put in 2 ETH (${:.2}), holds ${held:.2} after four swaps and two trades",
-        2.0 * end.mark_usd
-    );
-    assert!(held > 2.0 * end.mark_usd * 0.98);
+    assert_eq!(env.asset_balance(Asset::Eth, carol), 0, "no ETH comes back");
+    let held = usd(env.usdc(carol));
+    eprintln!("carol: put in $7,000, holds ${held:.2} USDC after two swaps each way and two trades");
+    assert!(held > 7_000.0 * 0.98);
 }
 
 #[test]
-fn sol_vault_withdraw_in_usdc() {
+fn sol_vault_pays_out_in_usdc() {
     let mut env = jupiter_env();
-    let alice = env.add_user("alice", 1_000 * SOL);
-    expect(env.deposit_single(Asset::Sol, "alice", 10 * SOL, 0));
+    let alice = env.add_user("alice", 10 * SOL);
+    expect(env.deposit(Asset::Sol, "alice", 1_500 * USDC));
     let shares = env.shares(Asset::Sol, alice);
     let sol_before = env.asset_balance(Asset::Sol, alice);
-    let meta = expect(env.withdraw_single(Asset::Sol, "alice", shares / 2, Receive::Usdc));
+    let meta = expect(env.withdraw(Asset::Sol, "alice", shares / 2));
     let swap = &events::<Swapped>(&meta)[0];
     let out = &events::<Withdrawn>(&meta)[0];
-    let v = env.print(Asset::Sol, "alice takes half in USDC");
-    let sol_back = env.asset_balance(Asset::Sol, alice) + meta.fee - sol_before;
+    let v = env.print(Asset::Sol, "alice withdraws half");
     eprintln!(
-        "USDC out: ${:.2} (Jupiter sold {:.4} SOL); {:.6} SOL left over came back as SOL",
+        "USDC out: ${:.2} (Jupiter sold {:.4} SOL)",
         usd(out.usdc_out),
         swap.spent as f64 / SOL as f64,
-        sol_back as f64 / SOL as f64
     );
-    assert!(usd(out.usdc_out) > 5.0 * v.mark_usd * 0.98);
-    assert!(sol_back < SOL / 10);
+    assert_eq!(swap.spent, out.asset_sold, "the route sold all of it");
+    assert_eq!(env.usdc(alice), out.usdc_out);
+    assert!(usd(out.usdc_out) > 1_500.0 / 2.0 * 0.98);
+    assert_eq!(
+        sol_before - env.asset_balance(Asset::Sol, alice),
+        meta.fee,
+        "no SOL comes back: the wrapped-SOL account's rent is returned, and only the fee is paid"
+    );
     // Hedged to the lot; the leaver's trading cost can leave one lot until the next trade.
     assert!((v.position_lots + v.asset_units as i64 / 10_000_000).abs() <= 1);
 }
 
 #[test]
-fn bad_routes_are_refused() {
+fn routes_are_resized_and_bad_routes_are_refused() {
     let mut env = jupiter_env();
     let frank = env.add_user("frank", 10 * SOL);
     env.mint_usdc(frank, 100_000 * USDC);
-    // An honest deposit first, so the vault holds ETH a bad route could reach for.
-    expect(env.deposit_single(Asset::Eth, "frank", 0, 7_000 * USDC));
     let usdc = 7_000 * USDC;
     let plan = 3_500 * USDC;
 
-    // A third of the plan: refused.
+    // An honest deposit first, so the vault holds ETH a bad route could reach for. Its route
+    // was built for a third of the plan; resized, the vault buys with exactly half the USDC.
     let third = env
         .jupiter_route_for(Asset::Eth, Sell::Usdc, plan / 3)
         .route;
-    let ix = env.deposit_ix_with(Asset::Eth, frank, 0, usdc, 0, Some(third));
-    assert!(failed_with(
-        env.send("frank", vec![ix], "wrong amount"),
-        "SwapAmountOff"
-    ));
+    let ix = env.deposit_ix_with(Asset::Eth, frank, usdc, 0, third);
+    let meta = expect(env.send("frank", vec![ix], "a third of the plan"));
+    assert_eq!(events::<Swapped>(&meta)[0].spent, plan);
 
     // The route's output paid to someone else: the vault receives nothing.
     let mut stolen = env.jupiter_route_for(Asset::Eth, Sell::Usdc, plan).route;
@@ -338,15 +269,16 @@ fn bad_routes_are_refused() {
     for meta in stolen.metas.iter_mut().filter(|m| m.pubkey == vault_eth) {
         meta.pubkey = thief;
     }
-    let ix = env.deposit_ix_with(Asset::Eth, frank, 0, usdc, 0, Some(stolen));
+    let ix = env.deposit_ix_with(Asset::Eth, frank, usdc, 0, stolen);
     assert!(failed_with(
         env.send("frank", vec![ix], "stolen output"),
         "SwapPriceTooLow"
     ));
 
-    // A route selling the vault's own ETH when the plan sells the deposit's USDC.
+    // A route selling the vault's own ETH when a deposit buys ETH with USDC. A $1 deposit, so
+    // the resized route ($0.50 in ETH units: 0.005 ETH) is within what the vault holds.
     let wrong_side = env.jupiter_route_for(Asset::Eth, Sell::Asset, ETH).route;
-    let ix = env.deposit_ix_with(Asset::Eth, frank, 0, usdc, 0, Some(wrong_side));
+    let ix = env.deposit_ix_with(Asset::Eth, frank, USDC, 0, wrong_side);
     assert!(failed_with(
         env.send("frank", vec![ix], "wrong side"),
         "SwapMovedVaultFunds"
@@ -354,7 +286,7 @@ fn bad_routes_are_refused() {
 
     // Only the whitelisted venue.
     let route = env.jupiter_route_for(Asset::Eth, Sell::Usdc, plan).route;
-    let mut ix = env.deposit_ix_with(Asset::Eth, frank, 0, usdc, 0, Some(route));
+    let mut ix = env.deposit_ix_with(Asset::Eth, frank, usdc, 0, route);
     for meta in ix.accounts.iter_mut().filter(|m| m.pubkey == JUPITER) {
         meta.pubkey = anchor_spl::token::ID;
     }
@@ -363,21 +295,20 @@ fn bad_routes_are_refused() {
         "InvalidSwapAccounts"
     ));
 
-    // A route on a deposit already at the vault's mix.
-    env.mint_asset(Asset::Eth, frank, ETH);
-    let value = env.mark_price(Asset::Eth).value;
-    let route = env.jupiter_route_for(Asset::Eth, Sell::Usdc, plan).route;
-    let ix = env.deposit_ix_with(Asset::Eth, frank, ETH, value, 0, Some(route));
+    // Only Jupiter's own route instructions, which the vault knows how to resize.
+    let mut other = env.jupiter_route_for(Asset::Eth, Sell::Usdc, plan).route;
+    other.args.data[0] ^= 1;
+    let ix = env.deposit_ix_with(Asset::Eth, frank, usdc, 0, other);
     assert!(failed_with(
-        env.send("frank", vec![ix], "needless route"),
-        "SwapNotNeeded"
+        env.send("frank", vec![ix], "other instruction"),
+        "UnsupportedRoute"
     ));
 
     // Phoenix marking ETH 2.5% under what Jupiter charges: buying there would cost the vault.
     let price = env.jupiter_price(Asset::Eth, Sell::Usdc);
     env.move_price(Asset::Eth, (price * 0.975).round());
     assert!(failed_with(
-        env.deposit_single(Asset::Eth, "frank", 0, usdc),
+        env.deposit(Asset::Eth, "frank", usdc),
         "SwapPriceTooLow"
     ));
 }

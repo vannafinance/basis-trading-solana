@@ -20,7 +20,7 @@ is in the current code.
 | M-06 | An xStock multiplier jump at a known time can be deposited around | Medium | Fixed |
 | M-07 | A zero price band freezes every exit | Medium | Fixed |
 | M-08 | Every withdrawal parses Phoenix's perp asset map at fixed offsets | Medium | Fixed |
-| M-09 | Deposits off the vault's mix trade its hedged asset at the perp mark | Medium | Fixed |
+| M-09 | Deposits off the vault's mix trade its hedged asset at the perp mark | Medium | Fixed (deposits are USDC only now) |
 | M-10 | Phoenix's withdraw throttle, queue or deposit cooldown make exits revert | Medium | Open |
 | L-01 | Deposits into a vault that owes more than it holds pay its debt | Low | Fixed |
 | L-02 | Deposits and withdrawals price shares differently (virtual offset on one side only) | Low | Fixed |
@@ -32,6 +32,9 @@ is in the current code.
 | L-08 | The xStock issuer can pause, freeze or take the vault's tokens | Low | Acknowledged |
 | L-09 | Stray USDC or PhUSD in the vault's token accounts is uncounted and unrecoverable | Info | Open |
 | I-01..I-05 | See "Informational" | Info | — |
+| U-01 | USDC-only payouts: holders cannot leave while Jupiter is down or swaps are off | Medium | Acknowledged |
+| U-02 | The vault rewrites Jupiter's route data to resize it | Low | Acknowledged |
+| U-03 | Every deposit and exit now takes Jupiter's price, within `slippage_bps` of the mark | Low | Acknowledged |
 
 No finding lets an ordinary user steal funds from an honestly run vault. The two Highs need a
 privileged key (admin or keeper); the Mediums are griefing, liveness, admin-error and
@@ -53,7 +56,8 @@ section.
   through; the mapping below uses the public findings.
 
 Each fix has a regression test in `tests/audit.rs` that attacks the program the way the
-finding describes (15 tests). The full suite is 65 tests (49 integration, 16 unit), all passing.
+finding describes (15 tests). The full suite is 64 tests (49 integration, 15 unit), all passing
+after the USDC-only change (see its own section).
 
 ## High
 
@@ -144,8 +148,9 @@ in the mint in advance. A deposit just before a large step and a withdrawal afte
 of the step from the holders. Around a split, Phoenix's perp and the multiplier change at
 different moments, and a deposit could be valued at the wrong number of shares (up to 2x). Fix:
 when the multiplier changes by more than 0.25%, deposits are refused from a day before it takes
-effect until three days after (`MultiplierChanging`). Withdrawals stay open: they pay in kind,
-which is fair whatever the price. A regular dividend (about 0.07% for META) is smaller than a
+effect until three days after (`MultiplierChanging`). Withdrawals stay open: the leaver's tokens
+are sold through Jupiter, checked against the mark times the current multiplier, and the sale's
+cost is theirs. A regular dividend (about 0.07% for META) is smaller than a
 deposit's own costs and does not close deposits.
 Test: `m06_deposits_wait_out_a_large_multiplier_change`.
 
@@ -162,17 +167,17 @@ exact size first, so a layout change stops deposits (fail closed) but never exit
 ### M-09 Deposits off the vault's mix traded its hedged asset at the perp mark
 The vault values its tokens at Phoenix's perp mark. A deposit of USDC alone followed by a
 pro-rata withdrawal bought the vault's tokens at mark; when the perp trades away from spot (a
-sell-off, or a stock's weekend), the gap went to that user. Fix: a deposit without a swap must be
-within 5% of the vault's mix; a single-asset deposit goes through Jupiter at spot.
-Test: `m08_a_deposit_without_a_swap_must_match_the_mix`.
+sell-off, or a stock's weekend), the gap went to that user. Fix: a deposit without a swap had to
+be within 5% of the vault's mix. Since the USDC-only change every deposit is USDC and buys its
+asset through Jupiter at spot, so there is no deposit without a swap.
+Test: `m09_every_deposit_buys_its_asset_at_spot`.
 
 ### M-10 Phoenix's withdraw throttle, queue or deposit cooldown make exits revert (open)
 If Phoenix's global withdraw budget is spent, its queue is not empty, or it turns on a deposit
 cooldown (0 on mainnet today), Phoenix queues or refuses the USDC leg. `ember_withdraw` then
 finds no PhUSD and the whole withdrawal reverts. Direct Phoenix users are paid later; vault
 holders cannot leave until it clears. Recommendation: let a withdrawal take only what Phoenix
-releases now and burn shares for that part (as it already does for SOL), or let users take the
-asset leg alone.
+releases now and burn shares for that part (as it already does for SOL).
 
 ## Low
 
@@ -197,7 +202,7 @@ asset leg alone.
   leave more SOL in the account than counts as margin, which raises the liquidation risk. The
   keeper should watch counted against held SOL.
 - **L-06 The SOL vault's USDC debt (acknowledged).** After a rally the SOL vault owes USDC.
-  Leavers take SOL and leave the debt behind, so it grows as a share of what remains, and the
+  Leavers take their SOL (sold for USDC) and leave the debt behind, so it grows as a share of what remains, and the
   last holder waits for the keeper to repay it. This is the SOL vault's design; the keeper settles
   the debt.
 - **L-07 One-step admin transfer (open).** A typo in `set_config`'s admin key loses control for
@@ -240,7 +245,7 @@ zero (or to far fewer than they paid for), then withdraw both deposits. It does 
 4. The attacker loses part of the donation to the virtual shares; before this audit the
    victim's own shares took it.
 
-Test: `first_deposit_inflation_attack_fails`. The attacker deposits $7 at the mix, donates 10 ETH
+Test: `first_deposit_inflation_attack_fails`. The attacker deposits $7, donates 10 ETH
 ($35,000); the victim's $3,500 deposit reverts with their funds untouched; the attacker gets
 $30,630 back of $35,007.
 
@@ -269,6 +274,44 @@ nothing moves between holders even in a nearly empty vault.
 - `VaultCore`'s Phoenix, Hawkeye and Ember programs moved into a nested `phoenix` group (the
   account order changed), and `basis_vault` is writable.
 - `rebalance` with both amounts zero re-hedges only.
-- A deposit without a route must be within 5% of the vault's mix; USDC alone or the asset alone
-  needs a Jupiter route.
 - `swap_program` must be Jupiter v6 or the default key.
+- USDC-only (2026-10-07): `deposit(gti, atb, usdc_amount, min_shares, route)` takes a required
+  route and no asset; `withdraw(gti, atb, shares, min_usdc_out, route)` drops `min_asset_out` and
+  `receive`. Neither takes a `user_asset` account. `Deposited.asset_amount` became
+  `asset_bought`, `Withdrawn.asset_out` became `asset_sold`. Error 6020 `DepositOffMix` became
+  `UnsupportedRoute` (codes are unchanged).
+
+## USDC-only deposits and withdrawals (2026-10-07)
+
+Users now bring USDC only and get USDC only back. A deposit buys the asset through Jupiter (half
+for a spot vault, all of it for SOL); a withdrawal sells the leaver's part of the asset through
+Jupiter. The asset-only and mixed deposits, and the in-kind and asset-only payouts, are gone.
+The vault decides inside the transaction how much it sells, and resizes the client's route to
+that exact amount, so nothing is left unsold and nothing is paid in the asset. Reviewed against
+the same checks as H-01; every swap still goes through `VaultCore::swap`.
+
+- **U-01 Exits depend on Jupiter (medium, acknowledged).** Before, a withdrawal needed no swap
+  (`Both`), so holders could always leave in kind. Now every withdrawal with asset to sell needs
+  a Jupiter route: if Jupiter is down, upgraded away from v6's layout (U-02), or the admin turns
+  swaps off, holders cannot leave until it is back. Funds are not lost, and the SOL vault's USDC
+  leg (when Phoenix holds the SOL for its debt) still pays without a route. Recommendation: pay
+  in kind when `swap_program` is the default key, so turning swaps off becomes an emergency exit
+  instead of a freeze.
+- **U-02 Rewriting the route (low, acknowledged).** `swap::resize_route` sets the last 19 bytes
+  of Jupiter's `route` or `shared_accounts_route` data (`in_amount`, `quoted_out_amount`) and
+  scales the quote. Any other instruction is refused (`UnsupportedRoute`). A route resized far
+  from the size it was quoted for keeps its path but not its price impact; `check_fill` still
+  holds the fill to `slippage_bps` of the mark, and the side sold must move by exactly the
+  planned amount (`SwapAmountOff`, tightened from 1% short). If Jupiter changes the layout, swaps
+  fail closed (U-01).
+- **U-03 Jupiter's price on every flow (low, acknowledged).** Every deposit and exit now pays a
+  swap at Jupiter's price, which `check_fill` only bounds at `slippage_bps` of the mark (1% by
+  default). A sandwich can take up to that band from a user; users guard their own fill with
+  `min_shares` and `min_usdc_out`, which the client sets 0.5% under its simulation. A tighter
+  `slippage_bps` narrows the band for everyone.
+
+Tests: every deposit and withdrawal in the suite now swaps. Tests that move Phoenix's price use
+a mock Jupiter at Jupiter's address that pays at the mark (`tests/mock_jupiter`); `jupiter.rs`
+and the stock tests use real Jupiter routes. New: `routes_are_resized_and_bad_routes_are_refused`
+(a route built for a third of the amount is resized; another Jupiter instruction is refused) and
+`the_short_follows_what_the_swap_delivered_and_the_depositor_pays_for_it`.

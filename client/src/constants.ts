@@ -35,8 +35,6 @@ export const BPS = 10_000n;
 /** The share price's virtual offset: 1e6 shares and $1, on both deposit and withdrawal. */
 export const VIRTUAL_SHARES = 1_000_000n;
 export const VIRTUAL_USD = 1_000_000n;
-/** A deposit without a swap must be within this share of the vault's asset/USDC mix. */
-export const MIX_TOLERANCE_BPS = 500n;
 
 /**
  * Phoenix's accounts the vault's instructions name. The trader index and buffer lists grow as

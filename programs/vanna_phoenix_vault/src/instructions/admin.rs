@@ -128,7 +128,7 @@ impl VaultParams {
                 && self.max_oi_share_bps as u128 <= BPS_SCALE,
             VaultError::InvalidParameter
         );
-        // A spot vault's single-asset deposits must land above its margin floor.
+        // A spot vault's deposits must land above its margin floor.
         require!(
             vault.kind == VaultKind::NativeSol || self.target_margin_bps > self.margin_bps,
             VaultError::InvalidParameter

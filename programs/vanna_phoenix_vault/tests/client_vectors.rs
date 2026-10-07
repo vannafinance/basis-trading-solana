@@ -19,7 +19,7 @@ use vanna_phoenix_vault::events::Deposited;
 use vanna_phoenix_vault::instructions::PhoenixProgramsAccounts;
 use vanna_phoenix_vault::phoenix::*;
 use vanna_phoenix_vault::state::{authority_address, BasisVault, VaultKind};
-use vanna_phoenix_vault::swap::{Receive, SwapRoute};
+use vanna_phoenix_vault::swap::SwapRoute;
 use vanna_phoenix_vault::{accounts, instruction};
 
 fn key(n: u8) -> Pubkey {
@@ -79,19 +79,17 @@ fn client_vectors() {
         AccountMeta::new(key(41), false),
     ];
     // The user's accounts, as the client derives them: the share and USDC accounts under SPL
-    // Token, the asset account under the vault's asset token program (here `key(11)`).
+    // Token.
     let user = key(30);
     let user_shares = get_associated_token_address_with_program_id(&user, &key(4), &token);
-    let user_asset = get_associated_token_address_with_program_id(&user, &key(10), &key(11));
     let user_usdc = get_associated_token_address_with_program_id(&user, &key(5), &token);
 
     let mut deposit = accounts::Deposit {
         user,
         core: core(),
         user_shares,
-        user_asset: Some(user_asset),
-        user_usdc: Some(user_usdc),
-        swap_program: Some(JUPITER),
+        user_usdc,
+        swap_program: JUPITER,
         vault_wsol: None,
         token_program: token,
         associated_token_program: ata,
@@ -102,13 +100,12 @@ fn client_vectors() {
     let deposit_data = instruction::Deposit {
         gti: 1,
         atb: 1,
-        asset_amount: 123_456,
         usdc_amount: 7_890_000,
         min_shares: 42,
-        route: Some(SwapRoute {
+        route: SwapRoute {
             accounts: 3,
             data: vec![9, 8, 7],
-        }),
+        },
     }
     .data();
 
@@ -116,8 +113,7 @@ fn client_vectors() {
         user,
         core: core(),
         user_shares,
-        user_asset: Some(user_asset),
-        user_usdc: Some(user_usdc),
+        user_usdc,
         swap_program: None,
         vault_wsol: None,
         token_program: token,
@@ -130,9 +126,7 @@ fn client_vectors() {
         gti: 1,
         atb: 1,
         shares: 1_000_000,
-        min_asset_out: 5,
         min_usdc_out: 6,
-        receive: Receive::Usdc,
         route: None,
     }
     .data();
@@ -158,8 +152,8 @@ fn client_vectors() {
     let event = Deposited {
         basis_vault,
         user: key(30),
-        asset_amount: 1,
-        usdc_amount: 2,
+        usdc_amount: 1,
+        asset_bought: 2,
         shares: 3,
         value_usd: 4,
         nav_before_usd: 5,

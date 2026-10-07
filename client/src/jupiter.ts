@@ -1,5 +1,6 @@
-// Jupiter v6 routes for single-asset deposits and withdrawals. The vault runs the route itself,
-// signed by its authority PDA, so the route is asked for with that PDA as the user.
+// Jupiter v6 routes: every deposit buys the vault's asset with USDC and every withdrawal sells it
+// back. The vault runs the route itself, signed by its authority PDA, so the route is asked for
+// with that PDA as the user; the vault resizes it to the exact amount it sells.
 import { AccountMeta, PublicKey } from "@solana/web3.js";
 import { TOKEN_PROGRAM_ID } from "@solana/spl-token";
 import { JUPITER_API, JUPITER_PROGRAM_ID } from "./constants";

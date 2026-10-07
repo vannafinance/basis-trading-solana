@@ -368,8 +368,9 @@ impl<'info> VaultCore<'info> {
         ])
     }
 
-    /// Sells about `planned` of one side for the other through the venue's route, signed by
-    /// the vault authority. Returns what it spent and what it received.
+    /// Sells exactly `planned` of one side for the other through Jupiter, the route resized to
+    /// that amount and signed by the vault authority. Returns what it spent and what it
+    /// received. With `Config.swap_program` turned off (the default key), nothing swaps.
     #[allow(clippy::too_many_arguments)]
     pub fn swap(
         &self,
@@ -382,13 +383,16 @@ impl<'info> VaultCore<'info> {
         asset_account: &AccountInfo<'info>,
         seeds: &[&[&[u8]]],
     ) -> Result<(u64, u64)> {
-        let venue = venue.ok_or(VaultError::InvalidSwapAccounts)?;
+        let venue = venue
+            .filter(|v| v.key() == JUPITER_PROGRAM_ID)
+            .ok_or(VaultError::InvalidSwapAccounts)?;
+        let data = resize_route(&route.data, planned)?;
         let before = self.holdings(asset_account)?;
         invoke_route(
             venue,
             route_accounts,
             &self.authority.key(),
-            &route.data,
+            &data,
             seeds,
         )?;
         let after = self.holdings(asset_account)?;

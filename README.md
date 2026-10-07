@@ -6,6 +6,8 @@ tokenized stocks: TSLA, META). Each vault holds the asset and a short of the sam
 pay shorts. There are no fees, no stablecoin, and nothing is shared between vaults. Every vault
 has **caps** (below) that keep it a minority of its market's shorts.
 
+- Users deposit and withdraw **USDC only**. The vault buys the asset with the deposit through
+  Jupiter and sells the leaver's part back to USDC on the way out.
 - A user deposits and gets that vault's **shares**. The share price is **NAV / supply**.
 - Phoenix fills market orders in the same instruction, so deposits and withdrawals settle at
   once. There are no requests waiting for a keeper, unlike the GMTrade version.
@@ -22,8 +24,9 @@ Phoenix takes only USDC (as PhUSD, through Ember) and native SOL as collateral.
 |---|---|---|
 | Where the asset sits | in the vault's Phoenix trader account, as collateral | in the vault's own token account (Token-2022 for stocks) |
 | Short | same size as the SOL held | same size as the asset held (in shares, for stocks) |
+| A $1,000 deposit | all of it buys SOL | half buys the asset, half stays as margin |
 | Margin | the SOL itself (80% counted) | USDC on Phoenix, 1x by default |
-| Payout | SOL first; USDC only when SOL runs out | the leaver's part of the tokens, the rest in USDC |
+| Payout (USDC) | SOL leaves first and is sold; USDC margin only once the short is gone | the leaver's part of the tokens, sold, plus their part of the USDC |
 
 ## Stock vaults (TSLA, META)
 
@@ -87,54 +90,54 @@ Launch caps, from Phoenix and Jupiter on 2026-10-06 (`mainnet_params` in the tes
   vault's margin from 79.9% to 66.6% of its short, `phoenix_counts_only_500_sol_per_trader_so_the_sol_vault_stops_at_450`).
   The SOL vault stops at 450 SOL (about $54k). To grow past it, the SOL vault needs more trader
   accounts or USDC margin like ETH.
-- **One deposit** is sized to what the Phoenix book (and, for single-asset deposits, Jupiter)
-  takes near the mark; bigger amounts come in several transactions. META's xStock pools are
+- **One deposit** is sized to what the Phoenix book and Jupiter take near the mark; bigger
+  amounts come in several transactions. META's xStock pools are
   the thinnest: a $50k USDC deposit swaps $25k into METAx, between Jupiter's +0.53% at $10k
   and +0.90% at $50k.
 - **ETH funding** was negative over the last 7 days and negative over 14% of 3-day windows in
   the last 30: the funding guard keeps ETH deposits closed until it recovers.
 
-## Single-asset deposits and withdrawals
+## USDC in, USDC out
 
-A user brings **one asset**, USDC or the vault's asset. The vault plans the swap to its target
-mix (`target_margin_bps` of USDC per dollar of asset), the app builds a Jupiter route for
-exactly that amount with the vault authority as the trader, and the vault runs the route,
-checks the fill against Phoenix's mark price, and opens the short on what it ends up holding.
+Users bring **USDC only** and get **USDC only** back. A deposit buys the asset at spot through
+Jupiter: the vault keeps `target_margin_bps` of USDC per dollar of asset as margin and buys the
+asset with the rest (`swap::deposit_swap_amount`), checks the fill against Phoenix's mark price,
+and opens the short on what it ends up holding.
 
-| User brings ($35,000 of value, ETH $3,500) | Vault swaps | Vault ends with |
+| User deposits ($35,000, ETH at $3,500, SOL at $150) | Vault swaps | Vault ends with |
 |---|---|---|
-| ETH vault: $35,000 USDC | $17,500 USDC → ~5 ETH | ~5 ETH held, ~5 ETH short, $17,500 margin |
-| ETH vault: 10 ETH | 5 ETH → ~$17,480 USDC | 5 ETH held, 5 ETH short, ~$17,480 margin |
-| BTC vault: USDC or BTC | the same, half and half | BTC held = BTC short, 1x margin |
-| SOL vault: USDC | **all** of it → SOL | SOL held = SOL short, no USDC needed |
-| SOL vault: SOL | nothing | SOL held = SOL short |
+| ETH vault | $17,500 USDC → ~5 ETH | ~5 ETH held, ~5 ETH short, $17,500 margin |
+| BTC, TSLA, META vaults | the same, half and half | asset held = asset short, 1x margin |
+| SOL vault | **all** of it → ~233 SOL | SOL held = SOL short, no USDC needed |
 
 Why not keep the SOL vault's USDC as Phoenix collateral and just short? Phoenix does take
 USDC, but USDC plus a short is a naked short: it loses when SOL rises. Delta neutral needs the
 SOL itself, and since SOL is its own margin on Phoenix, all of the USDC buys SOL and all of it
 earns funding.
 
-`withdraw` takes `receive`: `Both` (no swap), `Asset` or `Usdc`. For a single asset the vault
-swaps the other part through the route; whatever the route leaves unsold (it is built a little
-under the estimate) is paid as it is.
+A withdrawal closes the leaver's part of the short, sells their part of the asset through
+Jupiter and pays them that USDC plus their part of the vault's USDC. The vault decides the
+amount it sells inside the transaction (it depends on the leaver's own trade), so the app
+builds the route for about that amount and the vault **resizes it to the exact amount**
+(`swap::resize_route`): it sets the route's input amount and scales Jupiter's quoted output with
+it. Nothing is left unsold, so nothing is paid in the asset. The leaver carries the swap's cost
+and `min_usdc_out` guards what they receive.
 
 Every swap goes through `Config.swap_program`, signed by the vault authority. It can only be
-Jupiter v6 (or the default key, which turns swaps off): the authority is the share mint's mint
-authority and the Phoenix trader, so no other program gets its signature. After the route the
-vault checks that:
-- the side it sold went down by between 99% and 100% of the planned amount (`SwapAmountOff`),
+Jupiter v6 (or the default key, which turns swaps off, and with them deposits and every
+withdrawal that has asset to sell): the authority is the share mint's mint authority and the
+Phoenix trader, so no other program gets its signature. The vault only resizes Jupiter's own
+`route` and `shared_accounts_route` instructions (`UnsupportedRoute` otherwise). After the
+route the vault checks that:
+- the side it sold went down by exactly the planned amount (`SwapAmountOff`),
 - the side it bought went up by at least the mark-price value less `slippage_bps` (`SwapPriceTooLow`),
 - its Phoenix tokens, the authority's lamports, the SOL in its trader account and the share
   supply did not move, the share mint authority is unchanged, and its token accounts are still
   the authority's with no delegate or close authority (`SwapMovedVaultFunds`).
 
 Native SOL goes through wrapped SOL, as Jupiter does: the vault opens its wrapped-SOL account,
-swaps, closes it (the user gets the account's rent back) and posts or pays the SOL.
-
-A deposit without a route must already be at the vault's mix, within 5% of its value (asset
-and USDC together; SOL alone for the SOL vault), and must leave the vault at least `margin_bps`
-of margin. Off the mix, the vault would trade its hedged asset at Phoenix's mark rather than at
-spot; USDC alone or the asset alone goes through a Jupiter route.
+swaps, closes it (the user gets the account's rent back) and posts the SOL to Phoenix (deposit)
+or pays the USDC (withdrawal).
 
 ### Jupiter
 
@@ -146,10 +149,12 @@ price impact land on the depositor, like the Phoenix trade.
 
 The app builds the route like this:
 
-1. The amount: what the vault will sell. USDC alone into a spot vault sells
-   `usdc × 10,000 / (10,000 + target_margin_bps)` (half at 1x); the asset alone sells
-   `asset × target_margin_bps / (10,000 + target_margin_bps)`; USDC into the SOL vault sells all
-   of it (`swap::plan_deposit_swap`).
+1. The amount: what the vault will sell. A deposit sells
+   `usdc × 10,000 / (10,000 + target_margin_bps)` of its USDC: half at 1x, all of it for the SOL
+   vault (`swap::deposit_swap_amount`). A withdrawal sells about the leaver's part of the asset:
+   their share of a spot vault's tokens, or for the SOL vault their payout in SOL less about
+   0.1% for closing their short (the client's `withdrawSwapEstimate`). The vault resizes the
+   route to the exact amount either way.
 2. `GET /swap/v1/quote` for that amount.
 3. `POST /swap/v1/swap-instructions` with `userPublicKey` = the vault authority PDA,
    `wrapAndUnwrapSol: false` (the vault wraps SOL itself), `useSharedAccounts: true`,
@@ -162,6 +167,10 @@ The app builds the route like this:
 5. Send a v0 transaction with Jupiter's lookup tables plus the vault's.
 
 `scripts/jupiter_fork.py` does steps 2 and 3 for the tests.
+
+**Jupiter is now on every path.** If Jupiter is down, or the admin turns swaps off, nobody can
+deposit and holders whose withdrawal has asset to sell cannot leave until it is back (a SOL
+vault holder whose SOL is held for the vault's USDC debt still gets the USDC Phoenix releases).
 
 ## Pieces
 
@@ -176,7 +185,7 @@ Vault parameters: the caps (`max_position_usd`, `max_asset_units`, `max_oi_share
 `max_deposit_usd`), `slippage_bps` (price band around the mark for the vault's orders and
 swaps, 10 to 1,000 bps), `keeper_band_bps` and `max_rebalance_usd` (the keeper's own band and
 daily volume), `margin_bps` (Phoenix effective collateral the vault keeps per dollar of short, a
-floor), `target_margin_bps` (USDC a single-asset deposit sets aside per dollar of asset: 10,000
+floor), `target_margin_bps` (USDC a deposit keeps as margin per dollar of asset it buys: 10,000
 for ETH, BTC and stocks, 0 for SOL), `deposits_open`, `after_hours_deposits`.
 
 ## Instructions
@@ -188,8 +197,8 @@ for ETH, BTC and stocks, 0 for SOL), `deposits_open`, `after_hours_deposits`.
 | `create_vault(kind, market, params, authority_nonce)` | admin | Vault, share mint, token accounts, registers the Phoenix trader. The market must match Phoenix's listing; the authority's address takes a random nonce, so nobody can register its trader first |
 | `update_vault` | admin | Parameters and caps |
 | `set_deposits_open(open)` | keeper or admin | The funding guard: closes or reopens a vault's deposits |
-| `deposit(asset, usdc, min_shares, route)` | user | Brings the asset and/or USDC, swaps to the target mix if routed, trades the short to match, mints shares |
-| `withdraw(shares, min_asset, min_usdc, receive, route)` | user | Shrinks the short, pays out (in one asset if routed), burns shares |
+| `deposit(usdc, min_shares, route)` | user | Brings USDC, buys the asset with the part that is not margin through Jupiter, trades the short to match, mints shares |
+| `withdraw(shares, min_usdc, route)` | user | Shrinks the short, sells the leaver's part of the asset through Jupiter, pays USDC, burns shares |
 | `rebalance(buy_asset, asset, usdc)` | keeper | Swaps asset and USDC with the keeper within `keeper_band_bps` of the mark, up to `max_rebalance_usd` a day, then re-hedges; with both amounts zero, re-hedges only |
 
 `deposit`, `withdraw` and `rebalance` take Phoenix's global trader index and active trader
@@ -272,72 +281,77 @@ BTC, ETH and SOL; the tests add TSLA and META markets by repeating its SOL marke
 mainnet's stock lot and tick sizes. Fixture prices: SOL 150, ETH 3,500, BTC 100,000, TSLA 382,
 META 746. The fixture maker quotes 0.05% around the price.
 
-Every swap in the tests is a **real Jupiter v6 route over a real pool** (Orca Whirlpool for
-SOL, ETH and BTC; Raydium CLMM, where xStocks trade deepest, for TSLAx and METAx): the
-tests load the Jupiter, Whirlpool and Raydium programs and every account the routes touch, snapshotted
-from mainnet by `scripts/jupiter_fork.py` (routes and accounts in
-`tests/fixtures/jupiter_routes.json`, programs cached under `target/deploy/.cache/mainnet`),
-with the clock at the snapshot's time and Phoenix's marks between the routes' buy and sell
-prices. There is one route each way per vault; a test resizes it to the exact amount the vault
-plans by rewriting the input amount and quote at the end of the route's data, as Jupiter's API
-would return for that amount. The routes are pinned to one AMM each: Jupiter's best routes
-often go through proprietary market makers whose quotes expire within slots, which a snapshot
-cannot replay. On mainnet the vault takes whatever route Jupiter gives.
+Every deposit and withdrawal swaps, so every test swaps too, in one of two ways:
+
+- **Real Jupiter** (`jupiter.rs`, the TSLA and META Raydium tests, transaction sizes): a real
+  Jupiter v6 route over a real pool (Orca Whirlpool for SOL, ETH and BTC; Raydium CLMM, where
+  xStocks trade deepest, for TSLAx and METAx). The tests load the Jupiter, Whirlpool and Raydium
+  programs and every account the routes touch, snapshotted from mainnet by
+  `scripts/jupiter_fork.py` (routes and accounts in `tests/fixtures/jupiter_routes.json`,
+  programs cached under `target/deploy/.cache/mainnet`), with the clock at the snapshot's time
+  and Phoenix's marks between the routes' buy and sell prices. There is one route each way per
+  vault, and the vault resizes it to the amount it sells, as it does on mainnet. The routes are
+  pinned to one AMM each: Jupiter's best routes often go through proprietary market makers
+  whose quotes expire within slots, which a snapshot cannot replay. On mainnet the vault takes
+  whatever route Jupiter gives.
+- **A mock Jupiter** (`tests/mock_jupiter`, loaded at Jupiter's address) everywhere else. The
+  snapshotted pools only trade at mainnet's prices, and most tests move Phoenix's price (SOL to
+  $180, ETH to $4,550). The mock takes the amount the vault resized its route to and pays the
+  route's quote, which the test sets at Phoenix's mark, from a reserve it holds of every token.
 
 | File | Covers |
 |---|---|
-| `sol_vault.rs` | 10 SOL → 10 SOL short; price moves; fair entry and exit for two users; partial withdrawal; cap and price band; USDC debt after a rally |
-| `spot_vaults.rs` | ETH 50/50 deposit; ETH alone refused; rally + keeper margin top-up + exit; BTC two users and a drop; deposit cooldown |
+| `sol_vault.rs` | $1,500 → 10 SOL bought, 10 SOL short; price moves; fair entry and exit for two users in USDC; partial withdrawal; cap and price band; USDC debt after a rally |
+| `spot_vaults.rs` | ETH: $35,000 → 5 ETH held and short, $17,500 margin; a worse fill is the depositor's and the short follows what arrived; rally + keeper margin top-up + exit in USDC; BTC two users and a drop; deposit cooldown |
 | `reinvest.rs` | Funding accrues and is reinvested (SOL and ETH); negative funding; keeper role and price band |
-| `single_asset.rs` | Through Jupiter: USDC-only and asset-only deposits for ETH, BTC and SOL; USDC-only and ETH-only payouts (ETH and SOL vaults); bad routes refused |
-| `stock_vaults.rs` | TSLA: $10,000 USDC in and out through Jupiter (Raydium); META: the multiplier sizes the short, the NAV holds when META moves, METAx paid back; METAx alone sells its margin; after hours; a paused xStock |
+| `jupiter.rs` | Through real Jupiter: USDC deposits into the ETH, BTC and SOL vaults; USDC payouts that sell exactly the leaver's ETH and SOL; routes resized; bad routes refused |
+| `stock_vaults.rs` | TSLA and META: $10,000 and $5,000 in and out in USDC through Jupiter (Raydium); the multiplier sizes the short and the NAV holds when META moves; after hours; a paused xStock |
 | `caps.rs` | TSLA at launch caps: open-interest share, one-deposit size, position cap, withdrawals over the cap; Phoenix's 500 SOL limit and the 450 SOL cap; the keeper's funding guard |
-| `audit.rs` | One test per audit finding (AUDIT.md): Jupiter-only venue, keeper limits, upgrade-authority `initialize`, pre-registered traders, market checks, fake Phoenix index accounts, donations and withdrawals, multiplier changes, price-band floor, the deposit mix, insolvent vaults, symmetric share pricing, the first-deposit attack |
+| `audit.rs` | One test per audit finding (AUDIT.md): Jupiter-only venue, keeper limits, upgrade-authority `initialize`, pre-registered traders, market checks, fake Phoenix index accounts, donations and withdrawals, multiplier changes, price-band floor, every deposit buying at spot, insolvent vaults, symmetric share pricing, the first-deposit attack |
 | `guards.rs` | Shares are plain tokens (no freeze authority; withdraw in the same slot; transferred shares redeemed by their new holder); wrong market, fake Phoenix accounts, closed deposits, transaction sizes and compute |
 
 Results:
 
 | Scenario | Outcome |
 |---|---|
-| Alice 10 SOL at $150 | 10 SOL held, 10 SOL short, NAV $1,498.73 (her own $1.27 spread and fee) |
-| SOL to $180, Bob 10 SOL, SOL to $120 | NAV flat; Alice out with 12.48 SOL ($1,497.45); Bob out with 7.52 SOL + $895 USDC ($1,797.70) |
-| Carol 5 ETH + $17,500 | 5 ETH held, 5 ETH short; ETH +30%: margin 54% → keeper restores 1x → Carol out with $34,966 |
-| One day at a 1% perp premium (SOL vault, $15k) | +$46 funding, share price +0.31%; reinvested into 0.305 SOL |
+| Alice $1,500 at $150 | 10 SOL bought, held and short, NAV $1,498.73 (her own $1.27 spread and fee) |
+| SOL to $180, Bob $1,800, SOL to $120 | NAV flat; Alice out with $1,497.45 USDC (12.48 SOL sold); Bob out with $1,797.70 USDC (7.52 SOL sold, plus the short's profit) |
+| SOL to $200, Alice withdraws all | the vault owes USDC: $1,328.79 now, the rest after the keeper settles the debt: $1,497.02 in all |
+| Carol $35,000 | 5 ETH held, 5 ETH short, $17,500 margin; ETH +30%: margin 54% → keeper restores 1x → Carol out with $34,965.81 USDC |
+| One day at a 1% perp premium (SOL vault, $15k) | +$45 funding, share price +0.30%; reinvested into 0.298 SOL |
 | Three days at 1% premium (ETH vault, $70k) | +$360 funding, reinvested into 0.102 ETH |
 | A day of negative funding | share price −0.33%: the strategy's risk |
-| $7,000 USDC into the ETH vault (Jupiter) | $3,500 → 1.28503511 ETH (quote 1.28506688); vault holds and shorts what arrived; $6,982.84 of value after the short, 6,982.84 shares |
-| 2 ETH into the ETH vault (Jupiter) | 1 ETH → $2,701.65 USDC margin; 1 ETH held and short |
-| $20,000 USDC, then 0.2 BTC into the BTC vault (Jupiter) | $10,000 → 0.11599636 cbBTC; 0.1 BTC → $8,614.19; held = short, margin 99.9%, same share price for both |
-| $1,000 USDC into the SOL vault (Jupiter) | all of it → 8.31469940 SOL, unwrapped into Phoenix collateral; short 8.31 SOL; no USDC margin |
-| Carol out of the ETH vault, half in USDC, half in ETH (Jupiter) | $2,692.24 USDC, then 0.998457 ETH + $6.94: $5,408.28 of her $5,425.22 after four swaps and two trades |
-| Alice takes half of 10 SOL in USDC (Jupiter) | Jupiter sold 4.9708 SOL for $597.56; 0.0207 SOL the route left unsold came back as SOL |
-| $10,000 USDC into the TSLA vault and out again in USDC (Jupiter, Raydium) | $5,000 → 13.046671 TSLAx, exactly the quote; short 13.047 TSLA; out: $9,979.06 + 0.0065 TSLAx = $9,981.56 (0.18% for two swaps and two trades) |
-| 10 METAx + $7,500 into the META vault | short 10.029 META (multiplier 1.0028515); META +10%: NAV $14,974.84 → $14,974.81; out: 10 METAx + $6,744.43 = $14,967.82 |
-| TSLA vault at launch caps | refused while it would be all of the shorts; after others short 1,200 TSLA: $114,600 at once refused, three $91,700 deposits (9.1%, 16.7%, 23.1% of open interest), a fourth refused (28.6%) |
-| Bad routes (Jupiter) | a third of the plan, output paid elsewhere, the vault's own ETH sold, another venue, a needless route, Phoenix marking ETH 2.5% under Jupiter's price: all refused |
+| $7,000 USDC into the ETH vault (Jupiter) | $3,500 → 1.28537734 ETH, exactly the quote; vault holds and shorts what arrived; $6,982.86 of value after the short, 6,982.86 shares |
+| $20,000, then $10,000 into the BTC vault (Jupiter) | $10,000 → 0.11619306 cbBTC; held = short, margin 100%, same share price for both |
+| $1,000 USDC into the SOL vault (Jupiter) | all of it → 8.30811436 SOL, unwrapped into Phoenix collateral; short 8.31 SOL; no USDC margin |
+| Carol out of the ETH vault in two halves (Jupiter) | Jupiter sold exactly her 0.64268867 ETH each time; $6,990.59 USDC back of $7,000 after two swaps each way and two trades |
+| Alice takes half of $1,500 out of the SOL vault (Jupiter) | Jupiter sold exactly 6.2205 SOL; $748.26 USDC; no SOL comes back, only the fee is spent |
+| $10,000 USDC into the TSLA vault and out again (Jupiter, Raydium) | $5,000 → 13.137694 TSLAx; short 13.138 TSLA; out: $9,981.52 USDC (0.18% for two swaps and two trades), no TSLAx left over |
+| $15,000 into the META vault | $7,500 → 10.025 METAx, short 10.054 META (multiplier 1.0028515); META +10%: NAV $14,993.56 → $14,993.53; out: $14,986.52 USDC |
+| TSLA vault at launch caps | refused while it would be all of the shorts; after others short 1,200 TSLA: $114,600 at once refused, three $91,680 deposits (9.1%, 16.7%, 23.1% of open interest), a fourth refused (28.6%) |
+| Routes (Jupiter) | a route built for a third of the plan is resized and buys with exactly the plan; output paid elsewhere, the vault's own ETH sold, another venue, another Jupiter instruction, Phoenix marking ETH 2.5% under Jupiter's price: all refused |
 
-| Operation | Accounts | Legacy tx | With a lookup table | Compute |
+| Operation (real Jupiter) | Accounts | Legacy tx | With a lookup table | Compute |
 |---|---|---|---|---|
-| SOL deposit | 31 | 1,175 bytes | 343 bytes | 241k CU |
-| SOL withdraw | 32 | 1,208 bytes | 345 bytes | 246k CU |
-| ETH deposit (ETH + USDC) | 34 | 1,271 bytes (too big) | 346 bytes | 246k CU |
-| ETH withdraw | 34 | 1,272 bytes (too big) | 347 bytes | 272k CU |
-| ETH deposit, USDC only (Jupiter + Whirlpool) | 47 | 1,754 bytes (too big) | 426 bytes | 319k CU |
-| SOL deposit, USDC only (Jupiter + Whirlpool) | 46 | 1,722 bytes (too big) | 425 bytes | 336k CU |
-| TSLA deposit (TSLAx + USDC) | 35 | 1,303 bytes (too big) | 347 bytes | 255k CU |
-| TSLA deposit, USDC only (Jupiter + Raydium CLMM) | 51 | 1,888 bytes (too big) | 436 bytes | 331k CU |
+| SOL deposit (Whirlpool) | 46 | 1,712 bytes (too big) | 415 bytes | 331k CU |
+| SOL withdraw (Whirlpool) | 46 | 1,713 bytes (too big) | 416 bytes | 345k CU |
+| ETH deposit (Whirlpool) | 46 | 1,712 bytes (too big) | 415 bytes | 318k CU |
+| ETH withdraw (Whirlpool) | 46 | 1,713 bytes (too big) | 416 bytes | 332k CU |
+| TSLA deposit (Raydium CLMM) | 50 | 1,846 bytes (too big) | 425 bytes | 330k CU |
+| TSLA withdraw (Raydium CLMM) | 50 | 1,847 bytes (too big) | 426 bytes | 359k CU |
 
-Everything but plain SOL deposits needs an address lookup table. A Jupiter route adds its own
-accounts (25 for a direct Whirlpool route, 32 for Raydium CLMM; multi-hop routes more) and compute: a routed
-deposit stays under Solana's 64-account and 1.4M CU limits if the route is asked for with
-`maxAccounts` around 25.
+Every deposit and withdrawal needs an address lookup table. A Jupiter route adds its own
+accounts (25 for a direct Whirlpool route, 32 for Raydium CLMM; multi-hop routes more) and
+compute: a transaction stays under Solana's 64-account and 1.4M CU limits if the route is asked
+for with `maxAccounts` around 25.
 
 ## Build and test
 
 ```bash
-# Program (platform-tools v1.52)
-~/.local/share/solana/install/releases/3.1.10/solana-release/bin/cargo-build-sbf \
-  --manifest-path programs/vanna_phoenix_vault/Cargo.toml --sbf-out-dir target/deploy
+# Program and the tests' mock Jupiter (platform-tools v1.52)
+SBF=~/.local/share/solana/install/releases/3.1.10/solana-release/bin/cargo-build-sbf
+$SBF --manifest-path programs/vanna_phoenix_vault/Cargo.toml --sbf-out-dir target/deploy
+$SBF --manifest-path programs/vanna_phoenix_vault/tests/mock_jupiter/Cargo.toml --sbf-out-dir target/deploy
 
 # Jupiter, Orca and Raydium programs for the swap tests (once). Without the flag the script also takes
 # a fresh snapshot of the routes and accounts.
@@ -364,4 +378,6 @@ cargo test -p vanna_phoenix_vault -- --nocapture
 - The app: fetching Jupiter routes for the vault authority (the steps above) and sending v0
   transactions with lookup tables.
 - Rebalancing through a Jupiter route instead of the keeper's own inventory.
+- An exit that does not need Jupiter: with USDC-only payouts, holders cannot leave while Jupiter
+  is down or swaps are turned off (an in-kind fallback for that case is not built).
 - An audit.

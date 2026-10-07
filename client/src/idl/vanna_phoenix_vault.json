@@ -374,27 +374,20 @@
           "writable": true
         },
         {
-          "name": "user_asset",
-          "docs": [
-            "The user's asset tokens (spot vaults). The SOL vault takes lamports from `user`."
-          ],
-          "writable": true,
-          "optional": true
-        },
-        {
           "name": "user_usdc",
           "docs": [
-            "The user's USDC, when the deposit brings margin."
+            "The user's USDC: deposits are USDC only."
           ],
-          "writable": true,
-          "optional": true
+          "writable": true
         },
         {
-          "name": "swap_program",
-          "optional": true
+          "name": "swap_program"
         },
         {
           "name": "vault_wsol",
+          "docs": [
+            "vault's swap."
+          ],
           "writable": true,
           "optional": true
         },
@@ -421,10 +414,6 @@
           "type": "u8"
         },
         {
-          "name": "asset_amount",
-          "type": "u64"
-        },
-        {
           "name": "usdc_amount",
           "type": "u64"
         },
@@ -435,10 +424,8 @@
         {
           "name": "route",
           "type": {
-            "option": {
-              "defined": {
-                "name": "SwapRoute"
-              }
+            "defined": {
+              "name": "SwapRoute"
             }
           }
         }
@@ -940,7 +927,7 @@
         {
           "name": "user",
           "docs": [
-            "Receives the SOL vault's payout as lamports."
+            "Gets back the rent of the wrapped-SOL account the SOL vault sells through."
           ],
           "writable": true,
           "signer": true
@@ -1163,20 +1150,11 @@
           }
         },
         {
-          "name": "user_asset",
-          "docs": [
-            "Receives a spot vault's asset."
-          ],
-          "writable": true,
-          "optional": true
-        },
-        {
           "name": "user_usdc",
           "docs": [
-            "Receives the USDC part of the payout."
+            "Receives the payout: withdrawals are USDC only."
           ],
-          "writable": true,
-          "optional": true
+          "writable": true
         },
         {
           "name": "swap_program",
@@ -1184,6 +1162,9 @@
         },
         {
           "name": "vault_wsol",
+          "docs": [
+            "vault's swap."
+          ],
           "writable": true,
           "optional": true
         },
@@ -1214,20 +1195,8 @@
           "type": "u64"
         },
         {
-          "name": "min_asset_out",
-          "type": "u64"
-        },
-        {
           "name": "min_usdc_out",
           "type": "u64"
-        },
-        {
-          "name": "receive",
-          "type": {
-            "defined": {
-              "name": "Receive"
-            }
-          }
         },
         {
           "name": "route",
@@ -1453,8 +1422,8 @@
     },
     {
       "code": 6020,
-      "name": "DepositOffMix",
-      "msg": "A deposit without a swap must match the vault's asset and USDC mix"
+      "name": "UnsupportedRoute",
+      "msg": "The swap route is not a Jupiter route the vault can size"
     },
     {
       "code": 6021,
@@ -1696,9 +1665,8 @@
           {
             "name": "target_margin_bps",
             "docs": [
-              "USDC margin a single-asset deposit sets aside per dollar of asset, in bps: 10,000",
-              "(1x) splits a deposit half asset, half USDC. 0 for the SOL vault, whose SOL is its own",
-              "margin."
+              "USDC margin a deposit keeps per dollar of asset it buys, in bps: 10,000 (1x) splits a",
+              "deposit half asset, half USDC. 0 for the SOL vault, whose SOL is its own margin."
             ],
             "type": "u16"
           },
@@ -1787,8 +1755,9 @@
           {
             "name": "swap_program",
             "docs": [
-              "The swap venue the vault may route single-asset deposits and withdrawals through",
-              "(Jupiter on mainnet)."
+              "The swap venue every deposit buys the asset through and every withdrawal sells it",
+              "through: Jupiter v6. The default key turns swaps off, which stops deposits and every",
+              "withdrawal that has asset to sell."
             ],
             "type": "pubkey"
           },
@@ -1817,11 +1786,14 @@
             "type": "pubkey"
           },
           {
-            "name": "asset_amount",
+            "name": "usdc_amount",
             "type": "u64"
           },
           {
-            "name": "usdc_amount",
+            "name": "asset_bought",
+            "docs": [
+              "The asset the deposit's USDC bought."
+            ],
             "type": "u64"
           },
           {
@@ -1930,26 +1902,6 @@
           {
             "name": "position_lots",
             "type": "i64"
-          }
-        ]
-      }
-    },
-    {
-      "name": "Receive",
-      "docs": [
-        "How a withdrawal is paid."
-      ],
-      "type": {
-        "kind": "enum",
-        "variants": [
-          {
-            "name": "Both"
-          },
-          {
-            "name": "Asset"
-          },
-          {
-            "name": "Usdc"
           }
         ]
       }
@@ -2122,14 +2074,23 @@
           },
           {
             "name": "payout_usd",
+            "docs": [
+              "What left the vault for the burned shares, at the mark price."
+            ],
             "type": "u64"
           },
           {
-            "name": "asset_out",
+            "name": "asset_sold",
+            "docs": [
+              "The leaver's part of the asset, sold for USDC."
+            ],
             "type": "u64"
           },
           {
             "name": "usdc_out",
+            "docs": [
+              "The USDC the leaver received."
+            ],
             "type": "u64"
           },
           {

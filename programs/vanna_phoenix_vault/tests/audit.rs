@@ -4,7 +4,7 @@
 use crate::env::*;
 use anchor_lang::prelude::Pubkey;
 use anchor_lang::solana_program::instruction::AccountMeta;
-use vanna_phoenix_vault::events::{Deposited, Withdrawn};
+use vanna_phoenix_vault::events::{Deposited, Swapped, Withdrawn};
 use vanna_phoenix_vault::instructions::VaultParams;
 
 fn expect<T>(result: Result<T, Vec<String>>) -> T {
@@ -46,11 +46,9 @@ fn h02_a_keeper_cannot_drain_the_vault_through_round_trips() {
         },
     );
     env.setup_keeper_accounts();
-    let carol = env.add_user("carol", 10 * SOL);
-    env.mint_asset(Asset::Eth, carol, 10 * ETH);
-    env.mint_usdc(carol, 35_000 * USDC);
-    expect(env.deposit(Asset::Eth, "carol", 10 * ETH, 35_000 * USDC));
-    let start = env.print(Asset::Eth, "carol deposits 10 ETH + $35,000");
+    env.add_user("carol", 10 * SOL);
+    expect(env.deposit(Asset::Eth, "carol", 70_000 * USDC));
+    let start = env.print(Asset::Eth, "carol deposits $70,000 (10 ETH + margin)");
     let keeper = env.keeper;
     env.mint_asset(Asset::Eth, keeper, 10 * ETH);
     env.mint_usdc(keeper, 100_000 * USDC);
@@ -144,9 +142,8 @@ fn m03_create_vault_checks_the_market_against_phoenix() {
 fn m04_fake_trader_index_accounts_are_refused_before_valuing() {
     let mut env = Env::new();
     let ann = env.add_user("ann", 10 * SOL);
-    env.mint_asset(Asset::Eth, ann, ETH);
-    env.mint_usdc(ann, 3_500 * USDC);
-    let mut ix = env.deposit_ix(Asset::Eth, ann, ETH, 3_500 * USDC, 0);
+    env.mint_usdc(ann, 7_000 * USDC);
+    let mut ix = env.deposit_ix(Asset::Eth, ann, 7_000 * USDC, 0);
     let atb = env.atb[0];
     let other = env.perp_asset_map;
     for meta in ix.accounts.iter_mut().filter(|m| m.pubkey == atb) {
@@ -167,11 +164,10 @@ fn m04_fake_trader_index_accounts_are_refused_before_valuing() {
 fn m05_a_donation_cannot_block_withdrawals() {
     let mut env = Env::new();
     let ann = env.add_user("ann", 10 * SOL);
-    let bob = env.add_user("bob", 10 * SOL);
-    for (seed, who) in [("ann", ann), ("bob", bob)] {
-        env.mint_asset(Asset::Tsla, who, 10 * STOCK);
-        env.mint_usdc(who, 3_900 * USDC);
-        expect(env.deposit(Asset::Tsla, seed, 10 * STOCK, 3_900 * USDC));
+    env.add_user("bob", 10 * SOL);
+    // $7,640 each: 10 TSLAx at $382 and $3,820 of margin.
+    for seed in ["ann", "bob"] {
+        expect(env.deposit(Asset::Tsla, seed, 7_640 * USDC));
     }
     // More TSLAx than the whole book quotes (2,000 shares), sent straight to the vault.
     env.add_user("griefer", 10 * SOL);
@@ -183,8 +179,8 @@ fn m05_a_donation_cannot_block_withdrawals() {
     let out = &events::<Withdrawn>(&meta)[0];
     let v = env.print(Asset::Tsla, "ann withdraws after the donation");
     eprintln!(
-        "ann gets {:.2} TSLAx + ${:.2}; bob's 10 TSLA of short stay",
-        out.asset_out as f64 / STOCK as f64,
+        "ann sells {:.2} TSLAx, gets ${:.2}; bob's 10 TSLA of short stay",
+        out.asset_sold as f64 / STOCK as f64,
         usd(out.usdc_out)
     );
     assert_eq!(
@@ -199,9 +195,8 @@ fn m05_the_keeper_rehedges_a_donation() {
     let mut env = Env::new();
     env.setup_keeper_accounts();
     let ann = env.add_user("ann", 10 * SOL);
-    env.mint_asset(Asset::Tsla, ann, 15 * STOCK);
-    env.mint_usdc(ann, 3_900 * USDC);
-    expect(env.deposit(Asset::Tsla, "ann", 10 * STOCK, 3_900 * USDC));
+    expect(env.deposit(Asset::Tsla, "ann", 7_640 * USDC));
+    env.mint_asset(Asset::Tsla, ann, 5 * STOCK);
     env.donate_asset(Asset::Tsla, "ann", 5 * STOCK);
     expect(env.rebalance(Asset::Tsla, true, 0, 0));
     let v = env.print(Asset::Tsla, "keeper re-hedges a 5 TSLAx donation");
@@ -210,14 +205,12 @@ fn m05_the_keeper_rehedges_a_donation() {
 
 /// M-06: a stock token's multiplier can jump (a special dividend, a split) at a time set in
 /// advance; a deposit around it could be valued at the wrong number of shares. Deposits wait
-/// for it to settle; withdrawals, which pay in kind, stay open.
+/// for it to settle; withdrawals stay open.
 #[test]
 fn m06_deposits_wait_out_a_large_multiplier_change() {
     let mut env = Env::new();
     let cy = env.add_user("cy", 10 * SOL);
-    env.mint_asset(Asset::Meta, cy, 20 * STOCK);
-    env.mint_usdc(cy, 15_000 * USDC);
-    expect(env.deposit(Asset::Meta, "cy", 10 * STOCK, 7_500 * USDC));
+    expect(env.deposit(Asset::Meta, "cy", 15_000 * USDC));
     // A 2-for-1 split through the multiplier, an hour from now.
     let now = env
         .ctx
@@ -227,14 +220,14 @@ fn m06_deposits_wait_out_a_large_multiplier_change() {
     let multiplier = env.multiplier(Asset::Meta);
     env.set_multiplier(Asset::Meta, multiplier, multiplier * 2.0, now + 3_600);
     assert!(failed_with(
-        env.deposit(Asset::Meta, "cy", 10 * STOCK, 7_500 * USDC),
+        env.deposit(Asset::Meta, "cy", 15_000 * USDC),
         "MultiplierChanging"
     ));
     let half = env.shares(Asset::Meta, cy) / 2;
     expect(env.withdraw(Asset::Meta, "cy", half));
     // A regular dividend's step does not stop deposits.
     env.set_multiplier(Asset::Meta, multiplier, multiplier * 1.0007, now + 3_600);
-    expect(env.deposit(Asset::Meta, "cy", 10 * STOCK, 7_500 * USDC));
+    expect(env.deposit(Asset::Meta, "cy", 15_000 * USDC));
 }
 
 /// M-07: the admin could set a price band of zero, where no order fills and nobody can leave.
@@ -254,29 +247,17 @@ fn m07_the_price_band_has_a_floor() {
     }
 }
 
-/// M-08: a deposit off the vault's mix (USDC alone, or the asset alone) without a swap traded
-/// the vault's hedged asset at Phoenix's mark, which can sit away from spot. It must swap.
+/// M-09: a deposit off the vault's mix without a swap traded the vault's hedged asset at
+/// Phoenix's mark, which can sit away from spot. Deposits are USDC only now, and every one buys
+/// its asset at spot through the route: half of it for a spot vault, all of it for SOL.
 #[test]
-fn m08_a_deposit_without_a_swap_must_match_the_mix() {
+fn m09_every_deposit_buys_its_asset_at_spot() {
     let mut env = Env::new();
-    let dee = env.add_user("dee", 10 * SOL);
-    env.mint_asset(Asset::Eth, dee, 2 * ETH);
-    env.mint_usdc(dee, 10_000 * USDC);
-    assert!(failed_with(
-        env.deposit(Asset::Eth, "dee", 0, 3_500 * USDC),
-        "DepositOffMix"
-    ));
-    assert!(failed_with(
-        env.deposit(Asset::Eth, "dee", ETH, 2_000 * USDC),
-        "DepositOffMix"
-    ));
-    // Within 5% of the mix is fine.
-    expect(env.deposit(Asset::Eth, "dee", ETH, 3_600 * USDC));
-    // The SOL vault's mix is SOL alone.
-    assert!(failed_with(
-        env.deposit(Asset::Sol, "dee", 0, 1_000 * USDC),
-        "DepositOffMix"
-    ));
+    env.add_user("dee", 10 * SOL);
+    let meta = expect(env.deposit(Asset::Eth, "dee", 1_000 * USDC));
+    assert_eq!(events::<Swapped>(&meta)[0].spent, 500 * USDC);
+    let meta = expect(env.deposit(Asset::Sol, "dee", 1_000 * USDC));
+    assert_eq!(events::<Swapped>(&meta)[0].spent, 1_000 * USDC);
 }
 
 /// L-01: deposits are refused while the vault owes more than it holds but has shares out: a
@@ -284,12 +265,12 @@ fn m08_a_deposit_without_a_swap_must_match_the_mix() {
 #[test]
 fn l01_no_deposits_into_a_wiped_out_vault() {
     let mut env = Env::new();
-    env.add_user("bo", 100 * SOL);
-    expect(env.deposit(Asset::Sol, "bo", 10 * SOL, 0));
+    env.add_user("bo", 10 * SOL);
+    expect(env.deposit(Asset::Sol, "bo", 1_500 * USDC));
     // The trader account loses its SOL (as in a liquidation): the vault's equity is negative.
     env.drain_sol_vault();
     assert!(failed_with(
-        env.deposit(Asset::Sol, "bo", 10 * SOL, 0),
+        env.deposit(Asset::Sol, "bo", 1_500 * USDC),
         "VaultInsolvent"
     ));
 }
@@ -302,16 +283,13 @@ fn l02_a_round_trip_in_a_tiny_vault_takes_nothing() {
     let mut env = Env::new();
     let dot = env.add_user("dot", 10 * SOL);
     let eve = env.add_user("eve", 10 * SOL);
-    env.mint_asset(Asset::Eth, dot, ETH / 50);
-    env.mint_usdc(dot, USDC);
+    env.mint_asset(Asset::Eth, dot, ETH / 100);
     // Dot holds 0.7 shares of a vault worth $35.70: a share price near $51.
-    expect(env.deposit(Asset::Eth, "dot", ETH / 10_000, 350_000));
+    expect(env.deposit(Asset::Eth, "dot", 700_000));
     env.donate_asset(Asset::Eth, "dot", ETH / 100);
     let dot_before = env.view(Asset::Eth).nav_usd;
     // Eve deposits $70,000 and leaves at once.
-    env.mint_asset(Asset::Eth, eve, 10 * ETH);
-    env.mint_usdc(eve, 35_000 * USDC);
-    expect(env.deposit(Asset::Eth, "eve", 10 * ETH, 35_000 * USDC));
+    expect(env.deposit(Asset::Eth, "eve", 70_000 * USDC));
     let shares = env.shares(Asset::Eth, eve);
     expect(env.withdraw(Asset::Eth, "eve", shares));
     let dot_after = env.view(Asset::Eth).nav_usd;
@@ -329,28 +307,24 @@ fn first_deposit_inflation_attack_fails() {
     let mut env = Env::new();
     let atk = env.add_user("attacker", 10 * SOL);
     let vic = env.add_user("victim", 10 * SOL);
-    // 1. A dust deposit at the vault's mix: 0.001 ETH and $3.50.
-    env.mint_asset(Asset::Eth, atk, ETH / 1_000 + 10 * ETH);
-    env.mint_usdc(atk, 4 * USDC);
-    let meta = expect(env.deposit(Asset::Eth, "attacker", ETH / 1_000, 3_500_000));
+    // 1. A dust deposit: $7, which buys 0.001 ETH and keeps $3.50 of margin.
+    env.mint_asset(Asset::Eth, atk, 10 * ETH);
+    let meta = expect(env.deposit(Asset::Eth, "attacker", 7 * USDC));
     let dust = events::<Deposited>(&meta)[0].shares;
     // 2. 10 ETH ($35,000) donated straight to the vault's token account.
     env.donate_asset(Asset::Eth, "attacker", 10 * ETH);
     // 3. The victim deposits $3,500.
-    env.mint_asset(Asset::Eth, vic, ETH / 2);
-    env.mint_usdc(vic, 1_750 * USDC);
-    match env.deposit(Asset::Eth, "victim", ETH / 2, 1_750 * USDC) {
+    match env.deposit(Asset::Eth, "victim", 3_500 * USDC) {
         Err(_) => {
             // The donation is unhedged: hedging it with the victim's margin is refused.
             eprintln!("the victim's deposit reverts: they keep their $3,500");
-            assert_eq!(env.asset_balance(Asset::Eth, vic), ETH / 2);
-            assert_eq!(env.usdc(vic), 1_750 * USDC);
+            assert_eq!(env.usdc(vic), 3_500 * USDC);
         }
         Ok(meta) => {
             let dep = &events::<Deposited>(&meta)[0];
             let shares = env.shares(Asset::Eth, vic);
             let out = expect(env.withdraw(Asset::Eth, "victim", shares));
-            let back = usd(events::<Withdrawn>(&out)[0].payout_usd);
+            let back = usd(events::<Withdrawn>(&out)[0].usdc_out);
             assert!(back > usd(dep.value_usd) * 0.99, "the victim loses nothing");
         }
     }

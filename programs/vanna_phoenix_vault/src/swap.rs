@@ -1,11 +1,13 @@
-//! Swaps through an outside venue (Jupiter on mainnet), so a user can deposit or withdraw a
-//! single asset.
+//! Swaps through Jupiter, so users deposit and withdraw USDC only.
 //!
-//! The vault plans how much to swap; the client builds a route for that amount with the vault
-//! authority as the trader and passes the route's accounts after Phoenix's index accounts.
-//! The vault signs the route, then checks what actually moved: the side it sold went down by
-//! about the planned amount, the side it bought went up at no worse than `slippage_bps` from
-//! Phoenix's mark price, and nothing else it owns changed.
+//! A deposit sells USDC for the asset: the part that is not margin for a spot vault, all of it
+//! for the SOL vault. A withdrawal sells the leaver's part of the asset for USDC. The vault
+//! decides how much to sell; the client builds a Jupiter route for about that amount with the
+//! vault authority as the trader and passes the route's accounts after Phoenix's index
+//! accounts. The vault resizes the route to the exact amount (`resize_route`), signs it, then
+//! checks what actually moved: the side it sold went down by exactly that amount, the side it
+//! bought went up at no worse than `slippage_bps` from Phoenix's mark price, and nothing else
+//! it owns changed.
 
 use crate::constants::*;
 use crate::errors::VaultError;
@@ -22,17 +24,6 @@ pub struct SwapRoute {
     pub data: Vec<u8>,
 }
 
-/// How a withdrawal is paid.
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Receive {
-    /// The leaver's part of the asset, and the rest in USDC. No swap.
-    Both,
-    /// Everything in the asset: the USDC part is swapped into it.
-    Asset,
-    /// Everything in USDC: the asset part is swapped into it.
-    Usdc,
-}
-
 /// What a swap sells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sell {
@@ -40,46 +31,53 @@ pub enum Sell {
     Asset,
 }
 
-/// How much of a deposit to swap so it lands at the vault's target mix: `target_margin_bps`
-/// of USDC per dollar of asset. USDC alone keeps `t / (1 + t)` as margin and buys the asset
-/// with the rest; the asset alone keeps `1 / (1 + t)` and sells the rest for margin. Both
-/// splits are fixed fractions of the input, so the client can build the route for the exact
-/// amount. A mixed deposit swaps whatever side is over the mix, valued at the mark price.
-pub fn plan_deposit_swap(
-    price: &Price,
-    decimals: u8,
-    target_margin_bps: u16,
-    asset_amount: u64,
-    usdc_amount: u64,
-) -> Result<Option<(Sell, u64)>> {
-    let t = target_margin_bps as u128;
-    let plan = if asset_amount == 0 {
-        (
-            Sell::Usdc,
-            mul_div(usdc_amount as u128, BPS_SCALE, BPS_SCALE + t, false)?,
-        )
-    } else if usdc_amount == 0 {
-        (
-            Sell::Asset,
-            mul_div(asset_amount as u128, t, BPS_SCALE + t, false)?,
-        )
-    } else {
-        let usdc = usdc_amount as u128 * BPS_SCALE;
-        let wanted = price.usd_value(asset_amount as u128, decimals, false)? * t;
-        if usdc >= wanted {
-            (Sell::Usdc, (usdc - wanted) / (BPS_SCALE + t))
-        } else {
-            let usd = (wanted - usdc) / (BPS_SCALE + t);
-            (Sell::Asset, price.tokens_for_usd(usd, decimals, false)?)
-        }
-    };
-    Ok(match plan {
-        (_, 0) => None,
-        (sell, amount) => Some((sell, to_u64(amount)?)),
-    })
+/// How much of a USDC deposit buys the asset: all but the margin the vault keeps,
+/// `1 / (1 + t)` of it with `t` = `target_margin_bps`. Half at 1x; all of it for the SOL vault
+/// (`t` = 0), whose SOL is its own margin. A fixed fraction, so the client can build the route
+/// for the exact amount.
+pub fn deposit_swap_amount(usdc_amount: u64, target_margin_bps: u16) -> Result<u64> {
+    to_u64(mul_div(
+        usdc_amount as u128,
+        BPS_SCALE,
+        BPS_SCALE + target_margin_bps as u128,
+        false,
+    )?)
 }
 
-/// Checks a swap: it spent between `planned` less the tolerance and `planned`, and received at
+/// Jupiter v6's `route` and `shared_accounts_route`: the routes the vault runs. Both end with
+/// `in_amount: u64, quoted_out_amount: u64, slippage_bps: u16, platform_fee_bps: u8`.
+const JUPITER_ROUTE: [u8; 8] = [229, 23, 203, 151, 122, 227, 173, 42];
+const JUPITER_SHARED_ACCOUNTS_ROUTE: [u8; 8] = [193, 32, 155, 51, 65, 214, 156, 129];
+const ROUTE_TAIL: usize = 19;
+
+/// The route's data resized to sell exactly `amount`: its input amount set to `amount` and its
+/// quoted output scaled with it, as Jupiter quotes the same path for a new amount. A
+/// withdrawal's amount depends on its own trade, so the client can only build the route for
+/// about it; resized, nothing is left unsold. Price impact the new size adds is still held to
+/// `slippage_bps` from the mark by `check_fill`.
+pub fn resize_route(data: &[u8], amount: u64) -> Result<Vec<u8>> {
+    require!(
+        data.len() >= 8 + ROUTE_TAIL
+            && (data[..8] == JUPITER_ROUTE || data[..8] == JUPITER_SHARED_ACCOUNTS_ROUTE),
+        VaultError::UnsupportedRoute
+    );
+    let at = data.len() - ROUTE_TAIL;
+    let field = |i: usize| u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
+    let (in_amount, quoted) = (field(at), field(at + 8));
+    require!(in_amount > 0, VaultError::UnsupportedRoute);
+    let quoted = to_u64(mul_div(
+        quoted as u128,
+        amount as u128,
+        in_amount as u128,
+        false,
+    )?)?;
+    let mut data = data.to_vec();
+    data[at..at + 8].copy_from_slice(&amount.to_le_bytes());
+    data[at + 8..at + 16].copy_from_slice(&quoted.to_le_bytes());
+    Ok(data)
+}
+
+/// Checks a swap: it spent exactly `planned` (the route was resized to it), and received at
 /// least the mark-price value of what it spent, less `slippage_bps`.
 pub fn check_fill(
     sell: Sell,
@@ -90,11 +88,7 @@ pub fn check_fill(
     decimals: u8,
     slippage_bps: u16,
 ) -> Result<()> {
-    let floor = planned as u128 - planned as u128 * SWAP_TOLERANCE_BPS / BPS_SCALE;
-    require!(
-        spent as u128 >= floor && spent <= planned,
-        VaultError::SwapAmountOff
-    );
+    require!(spent == planned, VaultError::SwapAmountOff);
     let fair = match sell {
         Sell::Usdc => price.tokens_for_usd(spent as u128, decimals, false)?,
         Sell::Asset => price.usd_value(spent as u128, decimals, false)?,
@@ -168,36 +162,40 @@ mod tests {
     };
 
     #[test]
-    fn usdc_alone_buys_the_asset_with_what_is_not_margin() {
+    fn usdc_buys_the_asset_with_what_is_not_margin() {
         // $35,000 at 1x: $17,500 buys ETH, $17,500 stays as margin.
-        let plan = plan_deposit_swap(&ETH, 8, 10_000, 0, 35_000_000_000).unwrap();
-        assert_eq!(plan, Some((Sell::Usdc, 17_500_000_000)));
+        assert_eq!(
+            deposit_swap_amount(35_000_000_000, 10_000).unwrap(),
+            17_500_000_000
+        );
         // The SOL vault needs no USDC margin: all of it buys SOL.
-        let plan = plan_deposit_swap(&ETH, 9, 0, 0, 1_500_000_000).unwrap();
-        assert_eq!(plan, Some((Sell::Usdc, 1_500_000_000)));
-    }
-
-    #[test]
-    fn the_asset_alone_sells_what_becomes_margin() {
-        // 10 ETH at 1x: 5 ETH stay, 5 ETH become USDC margin.
-        let plan = plan_deposit_swap(&ETH, 8, 10_000, 1_000_000_000, 0).unwrap();
-        assert_eq!(plan, Some((Sell::Asset, 500_000_000)));
-        // SOL into the SOL vault: nothing to swap.
         assert_eq!(
-            plan_deposit_swap(&ETH, 9, 0, 10_000_000_000, 0).unwrap(),
-            None
+            deposit_swap_amount(1_500_000_000, 0).unwrap(),
+            1_500_000_000
         );
     }
 
+    fn shared_route(in_amount: u64, quoted: u64) -> Vec<u8> {
+        let mut data = JUPITER_SHARED_ACCOUNTS_ROUTE.to_vec();
+        data.extend_from_slice(&[3, 1, 2, 3]);
+        data.extend_from_slice(&in_amount.to_le_bytes());
+        data.extend_from_slice(&quoted.to_le_bytes());
+        data.extend_from_slice(&50u16.to_le_bytes());
+        data.push(0);
+        data
+    }
+
     #[test]
-    fn a_mixed_deposit_swaps_only_what_is_over_the_mix() {
-        assert_eq!(
-            plan_deposit_swap(&ETH, 8, 10_000, 500_000_000, 17_500_000_000).unwrap(),
-            None
-        );
-        // 5 ETH + $27,500: $10,000 too much USDC, half of it buys ETH.
-        let plan = plan_deposit_swap(&ETH, 8, 10_000, 500_000_000, 27_500_000_000).unwrap();
-        assert_eq!(plan, Some((Sell::Usdc, 5_000_000_000)));
+    fn a_route_is_resized_to_the_exact_amount() {
+        // Built for 4.98 SOL ($600), the vault sells 5 SOL: Jupiter's quote grows with it.
+        let data = resize_route(&shared_route(4_980_000_000, 600_000_000), 5_000_000_000).unwrap();
+        assert_eq!(data, shared_route(5_000_000_000, 602_409_638));
+        // Only Jupiter's own route instructions.
+        let mut other = shared_route(1, 1);
+        other[0] ^= 1;
+        assert!(resize_route(&other, 1).is_err());
+        assert!(resize_route(&shared_route(0, 1), 1).is_err());
+        assert!(resize_route(&JUPITER_ROUTE, 1).is_err());
     }
 
     #[test]
@@ -226,7 +224,7 @@ mod tests {
         assert!(check_fill(
             Sell::Usdc,
             17_500_000_000,
-            17_324_999_999,
+            17_499_999_999,
             495_000_000,
             &ETH,
             8,

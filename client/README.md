@@ -1,8 +1,8 @@
 # @vanna/phoenix-vault-client
 
 TypeScript client for the Vanna Phoenix basis vaults (`vanna_phoenix_vault`). It reads vaults,
-builds deposit and withdrawal transactions (with Jupiter routes for single-asset flows),
-previews them by simulation, and decodes events and errors.
+builds USDC deposit and withdrawal transactions (each with the Jupiter route that buys or sells
+the vault's asset), previews them by simulation, and decodes events and errors.
 
 The integration guide is [docs/FRONTEND_INTEGRATION.md](../docs/FRONTEND_INTEGRATION.md).
 

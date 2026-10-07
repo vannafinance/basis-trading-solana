@@ -3,15 +3,19 @@
 use crate::env::*;
 use anchor_lang::prelude::Pubkey;
 use anchor_lang::solana_program::instruction::AccountMeta;
+use vanna_phoenix_vault::events::Withdrawn;
 use vanna_phoenix_vault::instructions::VaultParams;
-use vanna_phoenix_vault::swap::Sell;
+
+fn expect<T>(result: Result<T, Vec<String>>) -> T {
+    result.unwrap_or_else(|logs| panic!("{}", logs.join("\n")))
+}
 
 #[test]
 fn shares_are_plain_tokens_anyone_can_hold_move_and_redeem() {
     let mut env = Env::new();
-    let alice = env.add_user("alice", 1_000 * SOL);
+    let alice = env.add_user("alice", 10 * SOL);
     let bob = env.add_user("bob", 10 * SOL);
-    env.deposit(Asset::Sol, "alice", 10 * SOL, 0).unwrap();
+    env.deposit(Asset::Sol, "alice", 1_500 * USDC).unwrap();
     let shares = env.shares(Asset::Sol, alice);
     assert_eq!(
         env.share_freeze_authority(Asset::Sol),
@@ -22,33 +26,25 @@ fn shares_are_plain_tokens_anyone_can_hold_move_and_redeem() {
 
     // Out in the same slot as in: there is no lock.
     let meta = env.withdraw(Asset::Sol, "alice", shares / 10).unwrap();
-    let out = &events::<vanna_phoenix_vault::events::Withdrawn>(&meta)[0];
-    eprintln!(
-        "alice withdraws 10% at once: {:.4} SOL",
-        out.asset_out as f64 / SOL as f64
-    );
+    let out = &events::<Withdrawn>(&meta)[0];
+    eprintln!("alice withdraws 10% at once: ${:.2}", usd(out.usdc_out));
 
     // Alice hands shares to Bob, who never deposited; Bob redeems them himself.
     env.create_ata("bob", bob, env.sol.share_mint);
     let gift = env.shares(Asset::Sol, alice) / 2;
     env.transfer_shares(Asset::Sol, "alice", bob, gift).unwrap();
     assert_eq!(env.shares(Asset::Sol, bob), gift);
-    let sol_before = env.asset_balance(Asset::Sol, bob);
-    let meta = env
-        .withdraw(Asset::Sol, "bob", gift)
-        .unwrap_or_else(|l| panic!("{}", l.join("\n")));
-    let out = &events::<vanna_phoenix_vault::events::Withdrawn>(&meta)[0];
-    let got = env.asset_balance(Asset::Sol, bob) + meta.fee - sol_before;
+    let meta = expect(env.withdraw(Asset::Sol, "bob", gift));
+    let out = &events::<Withdrawn>(&meta)[0];
     eprintln!(
-        "bob redeems {:.2} shares from alice: {:.4} SOL (${:.2})",
+        "bob redeems {:.2} shares from alice: ${:.2}",
         usd(gift),
-        got as f64 / SOL as f64,
-        usd(out.payout_usd)
+        usd(out.usdc_out)
     );
-    assert_eq!(got, out.asset_out);
+    assert_eq!(env.usdc(bob), out.usdc_out);
     assert_eq!(env.shares(Asset::Sol, bob), 0);
     assert!(
-        usd(out.payout_usd) > usd(gift) * 0.99,
+        usd(out.usdc_out) > usd(gift) * 0.99,
         "a share is worth about a dollar"
     );
 
@@ -63,8 +59,8 @@ fn shares_are_plain_tokens_anyone_can_hold_move_and_redeem() {
 #[test]
 fn a_vault_only_trades_its_own_market() {
     let mut env = Env::new();
-    let alice = env.add_user("alice", 1_000 * SOL);
-    let mut ix = env.deposit_ix(Asset::Sol, alice, 10 * SOL, 0, 0);
+    let alice = env.add_user("alice", 10 * SOL);
+    let mut ix = env.deposit_ix(Asset::Sol, alice, 1_500 * USDC, 0);
     let (sol_book, eth_book) = (env.sol.orderbook, env.eth.orderbook);
     for meta in ix.accounts.iter_mut().filter(|m| m.pubkey == sol_book) {
         meta.pubkey = eth_book;
@@ -78,10 +74,12 @@ fn a_vault_only_trades_its_own_market() {
 #[test]
 fn phoenix_index_accounts_must_be_phoenix_accounts() {
     let mut env = Env::new();
-    let alice = env.add_user("alice", 1_000 * SOL);
-    let mut ix = env.deposit_ix(Asset::Sol, alice, 10 * SOL, 0, 0);
-    let n = ix.accounts.len();
-    ix.accounts[n - 2] = AccountMeta::new(Pubkey::new_unique(), false);
+    let alice = env.add_user("alice", 10 * SOL);
+    env.mint_usdc(alice, 1_500 * USDC);
+    let mut ix = env.deposit_ix(Asset::Sol, alice, 1_500 * USDC, 0);
+    let gti = env.gti[0];
+    let at = ix.accounts.iter().position(|m| m.pubkey == gti).unwrap();
+    ix.accounts[at] = AccountMeta::new(Pubkey::new_unique(), false);
     assert!(failed_with(
         env.send("alice", vec![ix], "fake index"),
         "InvalidPhoenixAccount"
@@ -91,7 +89,7 @@ fn phoenix_index_accounts_must_be_phoenix_accounts() {
 #[test]
 fn deposits_close_and_the_protocol_pauses() {
     let mut env = Env::new();
-    env.add_user("alice", 1_000 * SOL);
+    env.add_user("alice", 10 * SOL);
     env.update_vault(
         Asset::Sol,
         VaultParams {
@@ -100,7 +98,7 @@ fn deposits_close_and_the_protocol_pauses() {
         },
     );
     assert!(failed_with(
-        env.deposit(Asset::Sol, "alice", SOL, 0),
+        env.deposit(Asset::Sol, "alice", 150 * USDC),
         "DepositsClosed"
     ));
 }
@@ -117,9 +115,8 @@ fn transaction_sizes_and_compute() {
     );
     env.setup_keeper_accounts();
     env.use_jupiter();
-    let alice = env.add_user("alice", 1_000 * SOL);
-    env.mint_asset(Asset::Eth, alice, 5 * ETH);
-    env.mint_usdc(alice, 17_500 * USDC);
+    let alice = env.add_user("alice", 10 * SOL);
+    env.mint_usdc(alice, 18_000 * USDC);
     let budget = solana_compute_budget_interface::ComputeBudgetInstruction::set_compute_unit_limit(
         1_400_000,
     );
@@ -132,91 +129,24 @@ fn transaction_sizes_and_compute() {
         assert!(v0 <= 1_232, "fits with a lookup table");
     };
 
-    let ix = env.deposit_ix(Asset::Sol, alice, 10 * SOL, 0, 0);
-    report(
-        "SOL deposit",
-        ix,
-        env.deposit(Asset::Sol, "alice", 10 * SOL, 0)
-            .unwrap()
-            .compute_units_consumed,
-    );
-    let shares = env.shares(Asset::Sol, alice) / 2;
-    let ix = env.withdraw_ix(Asset::Sol, alice, shares, 0, 0);
-    report(
-        "SOL withdraw",
-        ix,
-        env.withdraw(Asset::Sol, "alice", shares)
-            .unwrap()
-            .compute_units_consumed,
-    );
-
-    // 5 ETH and as much USDC as they are worth at Phoenix's mark: the vault's 1x mix.
-    let usdc = (5.0 * env.view(Asset::Eth).mark_usd * USDC as f64) as u64;
-    let ix = env.deposit_ix(Asset::Eth, alice, 5 * ETH, usdc, 0);
-    report(
-        "ETH deposit (ETH + USDC)",
-        ix,
-        env.deposit(Asset::Eth, "alice", 5 * ETH, usdc)
-            .unwrap_or_else(|l| panic!("{}", l.join("\n")))
-            .compute_units_consumed,
-    );
-    let shares = env.shares(Asset::Eth, alice) / 2;
-    let ix = env.withdraw_ix(Asset::Eth, alice, shares, 0, 0);
-    report(
-        "ETH withdraw (ETH + USDC)",
-        ix,
-        env.withdraw(Asset::Eth, "alice", shares)
-            .unwrap()
-            .compute_units_consumed,
-    );
-
-    // Single-asset deposits carry a real Jupiter route (25 accounts for a direct Orca route).
-    env.mint_usdc(alice, 8_000 * USDC);
-    let route = env
-        .jupiter_route_for(Asset::Eth, Sell::Usdc, 3_500 * USDC)
-        .route;
-    let ix = env.deposit_ix_with(Asset::Eth, alice, 0, 7_000 * USDC, 0, Some(route));
-    let cu = env
-        .send("alice", vec![ix.clone()], "routed deposit")
-        .unwrap()
-        .compute_units_consumed;
-    report("ETH deposit, USDC (Jupiter)", ix, cu);
-    let route = env
-        .jupiter_route_for(Asset::Sol, Sell::Usdc, 1_000 * USDC)
-        .route;
-    let ix = env.deposit_ix_with(Asset::Sol, alice, 0, 1_000 * USDC, 0, Some(route));
-    let cu = env
-        .send("alice", vec![ix.clone()], "routed deposit")
-        .unwrap()
-        .compute_units_consumed;
-    report("SOL deposit, USDC (Jupiter)", ix, cu);
-    // A stock vault: Token-2022 xStocks over a Raydium CLMM route (32 accounts).
-    env.mint_usdc(alice, 10_000 * USDC);
-    let route = env
-        .jupiter_route_for(Asset::Tsla, Sell::Usdc, 5_000 * USDC)
-        .route;
-    let ix = env.deposit_ix_with(Asset::Tsla, alice, 0, 10_000 * USDC, 0, Some(route));
-    let cu = env
-        .send("alice", vec![ix.clone()], "routed deposit")
-        .unwrap_or_else(|l| panic!("{}", l.join("\n")))
-        .compute_units_consumed;
-    report("TSLA deposit, USDC (Jupiter)", ix, cu);
-    env.mint_asset(Asset::Tsla, alice, 10 * STOCK);
-    env.mint_usdc(alice, 3_900 * USDC);
-    let ix = env.deposit_ix(Asset::Tsla, alice, 10 * STOCK, 3_900 * USDC, 0);
-    report(
-        "TSLA deposit (TSLAx + USDC)",
-        ix,
-        env.deposit(Asset::Tsla, "alice", 10 * STOCK, 3_900 * USDC)
-            .unwrap_or_else(|l| panic!("{}", l.join("\n")))
-            .compute_units_consumed,
-    );
+    // Every deposit and withdrawal carries a real Jupiter route: 25 accounts for a direct Orca
+    // route (SOL, ETH), 32 for Raydium CLMM (xStocks, Token-2022).
+    for (asset, usdc, label) in [
+        (Asset::Sol, 1_000, "SOL"),
+        (Asset::Eth, 7_000, "ETH"),
+        (Asset::Tsla, 10_000, "TSLA"),
+    ] {
+        let ix = env.deposit_ix(asset, alice, usdc * USDC, 0);
+        let cu = expect(env.send("alice", vec![ix.clone()], "deposit")).compute_units_consumed;
+        report(&format!("{label} deposit (Jupiter)"), ix, cu);
+        let shares = env.shares(asset, alice) / 2;
+        let ix = env.withdraw_ix(asset, alice, shares, 0);
+        let cu = expect(env.send("alice", vec![ix.clone()], "withdraw")).compute_units_consumed;
+        report(&format!("{label} withdraw (Jupiter)"), ix, cu);
+    }
 
     env.mint_usdc(env.keeper, 3_500 * USDC);
     let usdc = (env.view(Asset::Eth).mark_usd / 2.0 * USDC as f64) as u64;
-    let cu = env
-        .rebalance(Asset::Eth, false, ETH / 2, usdc)
-        .unwrap()
-        .compute_units_consumed;
+    let cu = expect(env.rebalance(Asset::Eth, false, ETH / 2, usdc)).compute_units_consumed;
     eprintln!("{:<26} {cu:>7} CU", "ETH keeper rebalance");
 }

@@ -1,15 +1,17 @@
 //! Vanna basis vaults on Solana, hedged on Phoenix perpetuals.
 //!
-//! One vault per asset (SOL, ETH, BTC, and tokenized stocks such as TSLA and META). A
-//! depositor gets the vault's shares; the vault holds the asset and a short of the same size
-//! on Phoenix, so its value stays flat in USD while it earns the funding that longs pay
-//! shorts. The share price is the vault's NAV over its supply. There are no fees and no
-//! stablecoin; nothing is shared between vaults.
+//! One vault per asset (SOL, ETH, BTC, and tokenized stocks such as TSLA and META). Users
+//! deposit and withdraw USDC only, and get the vault's shares; the vault buys the asset with
+//! the deposit through Jupiter and holds it with a short of the same size on Phoenix, so its
+//! value stays flat in USD while it earns the funding that longs pay shorts. The share price
+//! is the vault's NAV over its supply. There are no fees and no stablecoin; nothing is shared
+//! between vaults.
 //!
-//! Phoenix takes native SOL as collateral, so the SOL vault posts the deposit itself and
-//! shorts the same amount: 10 SOL in, 10 SOL short. ETH, BTC and stocks are not Phoenix
-//! collateral, so those vaults hold the asset as tokens (Token-2022 xStocks for stocks) and
-//! post USDC as the short's margin.
+//! Phoenix takes native SOL as collateral, so the SOL vault buys SOL with all of a deposit,
+//! posts it and shorts the same amount: $1,500 in at $150, 10 SOL bought, 10 SOL short. ETH,
+//! BTC and stocks are not Phoenix collateral, so those vaults buy the asset with half of a
+//! deposit, hold it as tokens (Token-2022 xStocks for stocks) and post the other half as the
+//! short's USDC margin.
 //!
 //! Each vault has caps: its short's notional, the asset it holds, its share of the market's
 //! open interest and the size of one deposit. Stock vaults close deposits while their market
@@ -83,35 +85,22 @@ pub mod vanna_phoenix_vault {
         ctx: Context<'info, Deposit<'info>>,
         gti: u8,
         atb: u8,
-        asset_amount: u64,
         usdc_amount: u64,
         min_shares: u64,
-        route: Option<swap::SwapRoute>,
+        route: swap::SwapRoute,
     ) -> Result<()> {
-        instructions::deposit(ctx, gti, atb, asset_amount, usdc_amount, min_shares, route)
+        instructions::deposit(ctx, gti, atb, usdc_amount, min_shares, route)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn withdraw<'info>(
         ctx: Context<'info, Withdraw<'info>>,
         gti: u8,
         atb: u8,
         shares: u64,
-        min_asset_out: u64,
         min_usdc_out: u64,
-        receive: swap::Receive,
         route: Option<swap::SwapRoute>,
     ) -> Result<()> {
-        instructions::withdraw(
-            ctx,
-            gti,
-            atb,
-            shares,
-            min_asset_out,
-            min_usdc_out,
-            receive,
-            route,
-        )
+        instructions::withdraw(ctx, gti, atb, shares, min_usdc_out, route)
     }
 
     // ---------------------------------------------------------------- keeper

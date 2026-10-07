@@ -1,0 +1,27 @@
+[package]
+name = "mock_jupiter"
+version = "0.1.0"
+description = "A stand-in for Jupiter v6 in the vault's tests: swaps at the price the test quotes"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+solana-account-info = "3"
+solana-cpi = "3"
+solana-instruction = "3"
+solana-program-entrypoint = "3"
+solana-program-error = "3"
+solana-pubkey = "3"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }
+
+# Its own workspace: built for the tests only, outside the program's.
+[workspace]

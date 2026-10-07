@@ -16,8 +16,9 @@ pub struct Config {
     pub withdraw_queue: Pubkey,
     /// Phoenix's token vault for `phoenix_mint`.
     pub global_vault: Pubkey,
-    /// The swap venue the vault may route single-asset deposits and withdrawals through
-    /// (Jupiter on mainnet).
+    /// The swap venue every deposit buys the asset through and every withdrawal sells it
+    /// through: Jupiter v6. The default key turns swaps off, which stops deposits and every
+    /// withdrawal that has asset to sell.
     pub swap_program: Pubkey,
     pub paused: bool,
     pub bump: u8,
@@ -109,9 +110,8 @@ pub struct BasisVault {
     /// Phoenix effective collateral the vault keeps per dollar of short, in bps. Deposits
     /// and reinvesting may not take the vault below it.
     pub margin_bps: u16,
-    /// USDC margin a single-asset deposit sets aside per dollar of asset, in bps: 10,000
-    /// (1x) splits a deposit half asset, half USDC. 0 for the SOL vault, whose SOL is its own
-    /// margin.
+    /// USDC margin a deposit keeps per dollar of asset it buys, in bps: 10,000 (1x) splits a
+    /// deposit half asset, half USDC. 0 for the SOL vault, whose SOL is its own margin.
     pub target_margin_bps: u16,
     pub deposits_open: bool,
     /// Whether deposits stay open while Phoenix trades the market after hours (stock markets

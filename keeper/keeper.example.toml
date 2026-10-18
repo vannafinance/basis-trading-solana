@@ -1,0 +1,63 @@
+# vanna-keeper configuration. Copy to keeper.toml and fill in the first block.
+# Run `vanna-keeper plan --config keeper.toml` first: it prints what the keeper would do and
+# sends nothing.
+
+rpc_url = "https://api.mainnet-beta.solana.com"
+# The config's `keeper` key (a Solana keypair JSON file). Keep it out of the repo.
+keypair_path = "/secure/vanna-keeper.json"
+vault_id = 1
+# The vault's address lookup tables. Deploys and unwinds don't fit a transaction without one.
+lookup_tables = []
+
+phoenix_api = "https://perp-api.phoenix.trade"
+jupiter_api = "https://lite-api.jup.ag/swap/v1"
+# jupiter_api_key = "..."
+# Accounts Jupiter's route may use: a deploy also names every leg, and Solana allows 64.
+jupiter_max_accounts = 20
+
+# How often the keeper reads the vault (seconds), and funding (Phoenix pays hourly).
+tick_secs = 30
+funding_refresh_secs = 900
+dry_run = false
+# alert_webhook = "https://hooks.slack.com/services/..."
+priority_fee_micro_lamports = 0
+
+# Phoenix symbols by asset id, only where the perp asset map's name is not the API's.
+# [symbols]
+# 12 = "TSLA"
+
+[policy]
+# Capital APR, percent a year: funding over the asset and the margin it takes together.
+# A spot leg at 1x earns its funding on half its capital; the SOL leg on all of it.
+entry_apr = 6.0
+exit_apr = 2.0
+rotate_gap_apr = 8.0
+manage_deposits = true
+close_deposits_apr = 3.0
+reopen_deposits_apr = 6.0
+
+# Size by open interest: stay near a quarter of a market's shorts.
+max_oi_share_bps = 2500
+trim_oi_share_bps = 3500
+max_leg_nav_share_bps = 5000
+
+# Margin: 1x for spot legs; the SOL leg is its own collateral at 80%.
+spot_margin_bps = 10000
+sol_margin_bps = 8000
+sol_collateral_weight_bps = 8000
+margin_headroom_bps = 2000
+margin_alarm_bps = 1000
+margin_topup_bps = 1000
+margin_release_bps = 2000
+
+hedge_tolerance_bps = 50
+min_trade_usd = 500
+max_trade_usd = 50000
+buffer_slack_usd = 1000
+# Refill the buffer once withdrawals take it under half its reserve.
+buffer_refill_bps = 5000
+max_actions_per_tick = 8
+failure_cooldown_secs = 600
+urgent_cooldown_secs = 60
+max_funding_age_secs = 10800
+request_alert_secs = 21600

@@ -6,9 +6,11 @@ skip-lint = false
 
 [programs.localnet]
 vanna_phoenix_vault = "GtuQoYxzytGKtLqQGkYrVbsaPHTZN5jboP25DrSmKvGr"
+vanna_phoenix_multi_vault = "ppTyvPjN6xCEvCX7zsjPBip393fVVm8RMvkiU3Lz9WA"
 
 [programs.mainnet]
 vanna_phoenix_vault = "GtuQoYxzytGKtLqQGkYrVbsaPHTZN5jboP25DrSmKvGr"
+vanna_phoenix_multi_vault = "ppTyvPjN6xCEvCX7zsjPBip393fVVm8RMvkiU3Lz9WA"
 
 [provider]
 cluster = "localnet"
@@ -16,3 +18,5 @@ wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "cargo test --manifest-path programs/vanna_phoenix_vault/Cargo.toml"
+test-multi = "cargo test -p vanna_phoenix_multi_vault"
+test-keeper = "cargo test -p vanna_keeper"

@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -p .",
     "check": "tsc -p . --noEmit",
-    "test": "tsc -p . && node dist/test/vectors.test.js"
+    "test": "tsc -p . && node dist/test/vectors.test.js && node dist/test/views.test.js"
   },
   "dependencies": {
     "@anchor-lang/core": "^1.2.1",

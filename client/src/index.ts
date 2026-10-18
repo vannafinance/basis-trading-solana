@@ -6,5 +6,6 @@ export * from "./jupiter";
 export * from "./state";
 export * from "./transaction";
 export * from "./flows";
+export * from "./views";
 export * from "./lookup-table";
 export type { VannaPhoenixVault } from "./idl/vanna_phoenix_vault";

@@ -1,0 +1,46 @@
+[package]
+name = "vanna_keeper"
+description = "Keeper bot for the Vanna multi-strategy basis vault: deploys, unwinds, re-hedges, moves margin and fulfils withdrawals within the vault's on-chain limits"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+autotests = false
+
+[lib]
+name = "vanna_keeper"
+
+[[bin]]
+name = "vanna-keeper"
+path = "src/bin/vanna-keeper.rs"
+
+[dependencies]
+vanna_phoenix_multi_vault = { workspace = true, features = ["no-entrypoint"] }
+anchor-lang.workspace = true
+anchor-spl.workspace = true
+phoenix-rise-ix.workspace = true
+anyhow.workspace = true
+base64.workspace = true
+bytemuck.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+solana-account-decoder-client-types.workspace = true
+solana-address-lookup-table-interface.workspace = true
+solana-commitment-config.workspace = true
+solana-compute-budget-interface.workspace = true
+solana-keypair.workspace = true
+solana-message.workspace = true
+solana-rpc-client.workspace = true
+solana-rpc-client-api.workspace = true
+solana-signer.workspace = true
+solana-transaction.workspace = true
+
+[dev-dependencies]
+litesvm.workspace = true
+phoenix-rise-litesvm-test.workspace = true
+solana-account.workspace = true
+
+[[test]]
+name = "vanna_keeper"
+path = "tests/main.rs"

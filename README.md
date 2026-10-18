@@ -16,6 +16,22 @@ has **caps** (below) that keep it a minority of its market's shorts.
 - Funding raises the NAV as soon as it accrues. The keeper **reinvests** it into more of the
   asset with a bigger short, so later funding is earned on it too.
 
+This repository also holds the **multi-strategy vault** (`vanna_phoenix_multi_vault`): one USDC
+vault spread over up to 8 hedged Phoenix markets by its keeper bot. Its parts sit where the
+single-asset vault's do:
+
+| Path | Single-asset vault | Multi-strategy vault |
+|---|---|---|
+| `programs/` (`src/`, `tests/`) | `vanna_phoenix_vault` | `vanna_phoenix-multi` |
+| Mock Jupiter for the tests | `programs/vanna_phoenix_vault/tests/mock_jupiter` (shared) | the same |
+| Keeper bot | | `keeper/` |
+| IDL | `client/src/idl/vanna_phoenix_vault.*` | `client/src/idl/vanna_phoenix_multi_vault.*` |
+| Docs | this README, `docs/FRONTEND_INTEGRATION.md` | `docs/multi_vault/` (README, frontend, keeper operations) |
+| Audit | `AUDIT.md` | `docs/multi_vault/AUDIT.md` |
+
+The rest of this README is about the single-asset vaults; the multi-strategy vault's is
+[docs/multi_vault/README.md](docs/multi_vault/README.md).
+
 ## SOL vault and ETH/BTC/stock vaults work differently
 
 Phoenix takes only USDC (as PhUSD, through Ember) and native SOL as collateral.
@@ -360,6 +376,10 @@ python3 scripts/jupiter_fork.py --programs-only
 # Tests (host toolchain 1.98.1 from rust-toolchain.toml). The first run downloads the mainnet
 # Phoenix, Ember and Hawkeye programs and caches them under target/deploy/.cache.
 cargo test -p vanna_phoenix_vault -- --nocapture
+
+# The multi-strategy vault and its keeper bot (same mock Jupiter)
+$SBF --manifest-path programs/vanna_phoenix-multi/Cargo.toml --sbf-out-dir target/deploy
+cargo test -p vanna_phoenix_multi_vault -p vanna_keeper
 ```
 
 

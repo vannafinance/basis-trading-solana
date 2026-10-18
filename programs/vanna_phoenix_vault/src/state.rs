@@ -47,12 +47,14 @@ impl Config {
 /// How a vault holds the asset it hedges.
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, Debug, PartialEq, Eq, InitSpace)]
 pub enum VaultKind {
-    /// SOL: the deposit is Phoenix collateral itself (native SOL in the trader account) and
-    /// backs a short of the same size. 10 SOL in, 10 SOL short.
+    /// SOL: all of a USDC deposit buys SOL, which is Phoenix collateral itself (native SOL in
+    /// the trader account) and backs a short of the same size. $1,500 in at $150: 10 SOL
+    /// held, 10 SOL short.
     NativeSol,
     /// ETH, BTC, tokenized stocks: Phoenix only takes USDC and SOL as collateral, so the
     /// vault holds the asset as spot tokens and posts USDC as the short's margin. At 1x
-    /// margin a deposit is half asset and half USDC: 5 ETH held, 5 ETH short.
+    /// margin half of a deposit buys the asset: $35,000 in at $3,500 is 5 ETH held, 5 ETH
+    /// short and $17,500 of margin.
     Spot,
 }
 

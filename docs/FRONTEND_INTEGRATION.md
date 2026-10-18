@@ -11,7 +11,8 @@ The client is checked byte for byte against the program's own Rust types (`npm t
 
 ## Contents
 
-1. [What the frontend does](#1-what-the-frontend-does)
+1. [What the frontend does](#1-what-the-frontend-does), and
+   [the functions that matter](#the-functions-that-matter): instructions, user calls, share price
 2. [Setup](#2-setup)
 3. [Units and conventions](#3-units-and-conventions)
 4. [Reading a vault](#4-reading-a-vault)
@@ -41,6 +42,73 @@ perps, so the share price stays flat in dollars and grows with funding.
 
 Deposits and withdrawals settle at once: there are no requests, queues or lockups. Each user
 pays their own trading costs.
+
+### The functions that matter
+
+The contract has eight instructions, and users only ever call two of them: `deposit` and
+`withdraw`. There is no on-chain "get price" instruction. The program prices shares inside
+`deposit` and `withdraw`, and the client reads the same price off-chain with the same math.
+
+**On-chain instructions** (`vanna_phoenix_vault`, see the [IDL](../client/src/idl/vanna_phoenix_vault.json)):
+
+| Instruction | Called by | What it does |
+|---|---|---|
+| `deposit(gti, atb, usdc_amount, min_shares, route)` | **User** | Takes USDC, buys the asset through Jupiter, opens the matching short on Phoenix and mints shares. Fails if it would mint fewer than `min_shares` |
+| `withdraw(gti, atb, shares, min_usdc_out, route?)` | **User** | Closes the user's part of the short, sells their part of the asset through Jupiter, burns the shares and pays USDC. Fails if it would pay less than `min_usdc_out` |
+| `rebalance(gti, atb, buy_asset, asset_amount, usdc_amount)` | Keeper | Swaps between USDC and the asset with the keeper, within `keeper_band_bps` of the mark, then trades the short to match. Reinvests funding. With both amounts zero it only re-hedges |
+| `set_deposits_open(open)` | Keeper or admin | Opens or closes one vault's deposits. The keeper closes them when funding turns poor |
+| `initialize(keeper, swap_program)` | The program's upgrade authority, once | Creates the config; the caller becomes the admin |
+| `set_config(admin, keeper, swap_program, paused)` | Admin | Changes the admin, the keeper, the swap venue (Jupiter or off) and the protocol-wide pause |
+| `create_vault(kind, market, params, authority_nonce)` | Admin, once per asset | Creates a vault with its share mint and token accounts, and registers its Phoenix trader |
+| `update_vault(params)` | Admin | Changes a vault's caps, price bands and settings |
+
+**Client functions behind each user action** (`client/src`):
+
+| User action | Function | Gives the UI |
+|---|---|---|
+| Deposit | `prepareDeposit(ctx, user, usdcAmount, slippageBps)`, then the wallet's `sendTransaction` | The transaction to sign, and the exact `shares` and `valueUsd` from a simulation |
+| Withdraw | `prepareWithdraw(ctx, user, shares, slippageBps)`, then the wallet's `sendTransaction` | The transaction to sign, and the exact `usdcOut` and `sharesBurned` |
+| Is the deposit button enabled? | `depositStatus(ctx, payer)` | `open` and the `reasons` it isn't |
+| Their shares and what they are worth | `getUserPosition(connection, vault, state, user)` | `{ shares, valueUsd }` |
+| Their USDC | `getUsdcBalance(connection, vault, user)` | USDC balance (6 dp) |
+| Their history and earnings | `getUserSummary(connection, program, vault, state, user)` | Deposits, withdrawals, `earningsUsd` |
+| The vault page | `getVaultState(connection, vault, payer, phoenix)`, or `getVaultPage(...)` for every field | NAV, share price, positions, APY, funding (section 4) |
+
+**The share (LP token) price** is `getVaultState(...).sharePrice`: USD per whole share, with 6
+decimals (`1_000_000n` is $1.00).
+
+```ts
+const state = await getVaultState(connection, vault, wallet.publicKey ?? VANNA.viewPayer, phoenix);
+state.sharePrice   // USD per 1 share (6 dp)
+state.nav          // the vault's value (USD, 6 dp)
+state.supply       // shares outstanding (6 dp)
+```
+
+It is computed exactly the way the program prices a withdrawal:
+
+```
+NAV        = asset held × Phoenix mark price
+           + Phoenix equity (USDC collateral + unrealized PnL + unsettled funding)
+sharePrice = 1e6 × (NAV + 1e6) / (supply + 1e6)
+```
+
+The `+ 1e6` terms are the program's virtual share and dollar. They make the first share cost $1
+and change the price of a vault with real deposits by a negligible amount.
+
+| Need | Function |
+|---|---|
+| Price of one share | `getVaultState(...).sharePrice` |
+| What a user's shares are worth | `getUserPosition(...).valueUsd`, or `shareValue(shares, state.nav, state.supply)` |
+| Shares a dollar amount buys | `sharesForValue(value, state.nav, state.supply)`; exact: `prepareDeposit(...).shares` |
+| Exact USDC for withdrawing some shares, after costs | `prepareWithdraw(...).usdcOut` |
+| Share price at a past deposit | `sharePriceAtDeposit({ valueUsd, shares })`, from a `deposited` event's fields as `bigint` |
+| APY from share-price growth | `realizedApy(events, state.sharePrice, days)` |
+
+`sharePrice` is before exit costs. A withdrawal pays slightly less: the user's own Phoenix fee,
+spread and Jupiter price impact. Show `prepareWithdraw(...).usdcOut` as the amount they get.
+
+Another program (the Vanna credit layer valuing shares as collateral, say) cannot call a price
+function on this contract. It has to read the same accounts and compute the same NAV itself.
 
 ## 2. Setup
 
@@ -186,6 +254,35 @@ Returns whether the deposit button should be enabled:
 
 The simulation in `prepareDeposit` catches every one of these with its exact program error, so
 the UI can rely on it and use the fields above only to explain why.
+
+### The vault page: every field and its getter
+
+`getVaultPage(connection, program, vault, payer, phoenix)` reads everything below in parallel
+(`client/src/views.ts`). Rates are percents (`number`); amounts are `bigint`, USD in 6 decimals.
+
+| UI field | Getter | Source |
+|---|---|---|
+| TVL | `page.state.nav` | Vault state |
+| Cap, room left | `page.capacity.capUsd`, `.roomUsd`, `.binding` | Vault caps; open interest from Phoenix's API. The SOL vault's cap is 450 SOL, not a dollar amount |
+| Vault APY | `page.apy` (`apyPct`, `estimated`, `label`) | The realized 7-day APY (`page.apy7d`) once the events hold a deposit 7 days old, else the estimate `page.yield7d.netPct` labelled "Est. APY". Never show `0.00%` for a missing history |
+| Vault APY (7D), (30D) | `page.apy7d`, `page.apy30d` | Share price at a deposit that old (events) to now; null without enough history |
+| Funding now | `page.funding.nowApr` | Phoenix's last hourly rate × 8,760 |
+| Net delta, hedge | `page.positions.netDeltaPct`, `.hedgeRatio` | Asset held vs the short, in market units |
+| Long leg | `page.positions.long` (`marketUnits`, `usd`, `heldIn`) | SOL: Phoenix collateral. Others: the vault's token account |
+| Short leg | `page.positions.short` (`marketUnits`, `usd`) | Phoenix position |
+| Spot / margin split | `page.positions.assetPct`, `.marginPct` | SOL: about 100 / 0. Others: about 50 / 50 |
+| Price rise to liquidation | `page.positions.liquidationRisePct`, `.liquidationPrice` | Phoenix's effective collateral and maintenance margin. SOL about +350%, spot vaults about +96% |
+| Yield breakdown | `page.yield7d` (`fundingPct`, `rebalancingPct`, `vaultFeePct`, `netPct`) | 7-day funding × `fundingExposure`; keeper rebalance costs from events. No vault fee |
+| Negative funding days | `page.funding.negativeDays` / `.days` | Phoenix's hourly funding, summed per UTC day |
+| Rebalanced … ago | `page.lastRebalance?.blockTime` | Newest `rebalanced` event read |
+| All transactions | `page.events` | `fetchEvents(connection, program, vault.address, { limit, before })` |
+| Your position, earnings | `getUserSummary(connection, program, vault, page.state, user)` | Shares × share price; earnings = value + USDC withdrawn − USDC deposited |
+| Wallet USDC | `getUsdcBalance(connection, vault, user)` | The user's USDC account |
+| You receive (shares) | `estimateDepositShares(page.state, usdc)` as they type; `prepareDeposit` for the exact amount | Share price now, less about 10 bps of entry cost |
+| Net APY, est. earnings | `estimateEarnings(amount, apy, days, borrowApr)` | Pass the Vanna credit layer's borrow rate when the USDC is borrowed |
+
+Not from this program: the USDC borrow APY, the margin account balance and the health factor
+come from the Vanna credit layer.
 
 ## 5. Deposit
 
